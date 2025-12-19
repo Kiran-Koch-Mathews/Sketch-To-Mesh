@@ -1,7 +1,10 @@
-﻿using UnityEngine;
-using UnityEngine.UI;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Linq;
+using TriangleNet.Geometry;
+using TriangleNet.Meshing;
+using UnityEditor;
+using UnityEngine;
+using UnityEngine.UI;
 
 public class SketchToMesh : MonoBehaviour
 {
@@ -11,7 +14,8 @@ public class SketchToMesh : MonoBehaviour
 		Sphere = 1,
 		Capsule = 2,
 		TriangularPrism = 3,
-		Pyramid = 4
+		Pyramid = 4,
+		Freeform = 5
 	}
 
 	#region UI
@@ -52,6 +56,7 @@ public class SketchToMesh : MonoBehaviour
 	[SerializeField] private ShapeType shapeToBuild = ShapeType.Box;
 	[Space(8)]
 	[SerializeField] private float meshDistance = 5f;
+	[Range(0f, 1f)]
 	[SerializeField] private float shapeDepth = 1f;
 	[SerializeField] float visibilityOffset = 0.25f;
 	[SerializeField] private LayerMask raycastMask = ~0;
@@ -73,8 +78,10 @@ public class SketchToMesh : MonoBehaviour
 		(List<Vector2Int> absCorners, List<Vector2Int> outlinePixels) = FindAbsoluteCorners(sketchTex);
 		if (absCorners == null) return;
 		List<Vector2Int> corners = FindCorners(sketchTex, absCorners, outlinePixels);
+		List<Vector2Int> orderedPath = FreeformMesh.TraceOutline(outlinePixels);
 
-		if (!forcedShape) shapeToBuild = PredictShape(sketchTex, absCorners, outlinePixels);
+		if (!forcedShape && shapeToBuild != ShapeType.Freeform) 
+			shapeToBuild = PredictShape(sketchTex, absCorners, orderedPath);
 
 		Vector2Int centerPx = new Vector2Int(
 			(absCorners[0].x + absCorners[3].x) >> 1,
@@ -114,6 +121,11 @@ public class SketchToMesh : MonoBehaviour
 
 			case ShapeType.Pyramid:
 				shapeMesh = BuildPyramidMesh(corners, centerPoint);
+				break;
+
+			case ShapeType.Freeform:
+				List<Vector2> cleanedSilhouette = FreeformMesh.ResamplePath(orderedPath, 10f);
+				shapeMesh = BuildFreeformMesh(cleanedSilhouette, centerPoint);
 				break;
 		}
 
@@ -213,17 +225,19 @@ public class SketchToMesh : MonoBehaviour
 	ShapeType PredictShape(Texture2D tex, List<Vector2Int> abs, List<Vector2Int> outline)
 	{
 		int c = ApproxCornerCount(outline);
+		print("Approximately: " + c + " Corners");
 		int w = abs[1].x - abs[0].x, h = abs[2].y - abs[0].y;
 		float ar = w / (float)h, fill = outline.Count / ((float)w * h);
 		if (c == 3) return ShapeType.TriangularPrism;       // or Pyramid
-		if (c == 4) return ShapeType.Box;
+		if (c < 6) return ShapeType.Box;
 		if (fill > 0.55f) return (ar > 1.2f || ar < 0.83f) ? ShapeType.Capsule : ShapeType.Sphere;
 
-		print(c);
 		return ShapeType.Sphere;
 	}
 
 	#region Helpers
+	const float approxScalar = 3.5f;
+
 	int ApproxCornerCount(List<Vector2Int> outline)
 	{
 		var hull = ConvexHull(outline);                       // already defined
@@ -240,7 +254,8 @@ public class SketchToMesh : MonoBehaviour
 		foreach (var p in cand)                                // merge nearby raw corners
 			if (corners.TrueForAll(c => Vector2.Distance(c, p) > distT))
 				corners.Add(p);
-		return corners.Count;
+
+		return (int)(corners.Count / approxScalar);
 	}
 	List<Vector2> ConvexHull(List<Vector2Int> pts)
 	{
@@ -271,6 +286,7 @@ public class SketchToMesh : MonoBehaviour
 
 		return PixelToWorldPoint(center, distance);
 	}
+
 	private float GetRaycastDistance(Vector2Int texPos)
 	{
 		Rect r = rawImage.rectTransform.rect;
@@ -296,12 +312,12 @@ public class SketchToMesh : MonoBehaviour
 		return meshDistance;
 	}
 
-	private Vector3 PixelToWorldPoint(Vector2Int texPos, float distance)
+	private Vector3 PixelToWorldPoint(Vector2 texPos, float distance)
 	{
 		// 1) Convert pixel coords -> local UI coords
 		Rect rect = rawImage.rectTransform.rect;
-		float normX = (float)texPos.x / sketchingTool.texture.width;
-		float normY = (float)texPos.y / sketchingTool.texture.height;
+		float normX = texPos.x / sketchingTool.texture.width;
+		float normY = texPos.y / sketchingTool.texture.height;
 
 		float localX = Mathf.Lerp(rect.xMin, rect.xMax, normX);
 		float localY = Mathf.Lerp(rect.yMin, rect.yMax, normY);
@@ -315,12 +331,170 @@ public class SketchToMesh : MonoBehaviour
 		Vector3 screenPoint = new Vector3(screenX, screenY, distance);
 		return mainCamera.ScreenToWorldPoint(screenPoint);
 	}
-	private Vector3 P2W(Vector2Int p) => PixelToWorldPoint(p, currentDistance);
+
+	public Vector3 P2W(Vector2 p) => PixelToWorldPoint(p, currentDistance);
 	private static float Cross(Vector2 o, Vector2 a, Vector2 b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
 	#endregion
+
 	#endregion
 
 	#region Shape Builders
+	const float boundaryMinThicknessFactor = 0.0005f;
+	const float depthToRadius = 0.4f;
+	const float boundaryEpsPixels = 0.75f;
+	const float domePow = 3f;
+
+	private Mesh BuildFreeformMesh(List<Vector2> outline, Vector3 centerPoint)
+	{
+		Polygon poly = new Polygon();
+
+		FreeformMesh.RemoveExtraPoints(ref outline);
+		foreach (Vector2 p in outline) 
+			poly.Add(new TriangleNet.Geometry.Vertex(p.x, p.y));
+
+		var meshOptions = new ConstraintOptions() { ConformingDelaunay = true };
+		var qualityOptions = new QualityOptions() { MinimumAngle = 25 };
+		var tMesh = (TriangleNet.Mesh)poly.Triangulate(meshOptions, qualityOptions);
+
+		Vector3 inflationDir = -mainCamera.transform.forward.normalized;
+		Vector3 planeN = inflationDir;
+
+		float scaledDepth = shapeDepth * (currentDistance / meshDistance);
+		float halfDepthWorld = scaledDepth * 0.5f;
+		float planarRadius = 0f;
+		for (int i = 0; i < outline.Count; i++)
+		{
+			Vector3 wp = P2W(outline[i]) - centerPoint;
+			Vector3 planar = wp - planeN * Vector3.Dot(wp, planeN);
+			planarRadius = Mathf.Max(planarRadius, planar.magnitude);
+		}
+
+		halfDepthWorld = Mathf.Max(halfDepthWorld, planarRadius * depthToRadius);
+
+		int halfCount = tMesh.Vertices.Count;
+		Vector3[] unityVertices = new Vector3[halfCount * 2];
+		bool[] pinned = new bool[halfCount * 2];
+
+		Dictionary<int, int> idToIndexMap = new Dictionary<int, int>(halfCount);
+		int currentIndex = 0;
+
+		// Find max distance to the edges
+		float maxDistPixels = 0f;
+		foreach (var v in tMesh.Vertices)
+		{
+			float d = FreeformMesh.GetDistanceToOutline(new Vector2((float)v.X, (float)v.Y), outline);
+			if (d > maxDistPixels) maxDistPixels = d;
+		}
+
+		// Build vertices and smoothing weights
+		float[] weights01 = new float[halfCount * 2];
+
+		foreach (var v in tMesh.Vertices)
+		{
+			idToIndexMap[v.ID] = currentIndex;
+
+			Vector2 posPixels = new Vector2((float)v.X, (float)v.Y);
+			Vector3 posWorldOnPlane = P2W(posPixels);
+
+			float distToOutline = FreeformMesh.GetDistanceToOutline(posPixels, outline);
+			float normalizedDist = Mathf.Clamp01(distToOutline / maxDistPixels);
+
+			float dome = 1f - Mathf.Cos(normalizedDist * Mathf.PI * 0.5f);
+			float domeSoft = Mathf.Pow(dome, domePow);
+
+			float thickness01 = Mathf.Lerp(boundaryMinThicknessFactor, 1f, domeSoft);
+			float zOffsetWorld = halfDepthWorld * thickness01;
+
+			unityVertices[currentIndex] =
+				(posWorldOnPlane + (inflationDir * zOffsetWorld)) - centerPoint;
+			unityVertices[currentIndex + halfCount] =
+				(posWorldOnPlane - (inflationDir * zOffsetWorld)) - centerPoint;
+
+			float t = Mathf.Clamp01(normalizedDist / 0.1f);
+			float w = Mathf.SmoothStep(0f, 1f, t);
+
+			weights01[currentIndex] = w;
+			weights01[currentIndex + halfCount] = w;
+
+			bool isBoundary = distToOutline <= boundaryEpsPixels;
+			pinned[currentIndex] = isBoundary;
+			pinned[currentIndex + halfCount] = isBoundary;
+
+			currentIndex++;
+		}
+
+		// Base triangles (front/back)
+		List<int> triList = new List<int>(tMesh.Triangles.Count * 3 * 2 + 4096);
+
+		foreach (var tri in tMesh.Triangles)
+		{
+			int id0 = idToIndexMap[tri.GetVertex(0).ID];
+			int id1 = idToIndexMap[tri.GetVertex(1).ID];
+			int id2 = idToIndexMap[tri.GetVertex(2).ID];
+
+			// Front
+			triList.Add(id0);
+			triList.Add(id2);
+			triList.Add(id1);
+
+			// Back
+			triList.Add(id0 + halfCount);
+			triList.Add(id1 + halfCount);
+			triList.Add(id2 + halfCount);
+		}
+
+		// Apply Smoothing
+		int[] tmpTris = triList.ToArray();
+		unityVertices = FreeformMesh.SmoothAlongDirection(unityVertices, tmpTris, inflationDir, weights01,
+																  iterations: 20, alpha: 0.55f);
+		Vector3 dir = inflationDir.normalized;
+		float maxAbs = 0f;
+		float[] h = new float[unityVertices.Length];
+		Vector3[] basePos = new Vector3[unityVertices.Length];
+
+		for (int i = 0; i < unityVertices.Length; i++)
+		{
+			float hi = Vector3.Dot(unityVertices[i], dir);
+			h[i] = hi;
+			basePos[i] = unityVertices[i] - dir * hi;
+			maxAbs = Mathf.Max(maxAbs, Mathf.Abs(hi));
+		}
+
+		if (maxAbs > 1e-6f)
+		{
+			// Keep a tiny minimum thickness so side walls never collapse.
+			float scale = halfDepthWorld / maxAbs;
+			float minAbsHeight = halfDepthWorld * boundaryMinThicknessFactor;
+
+			for (int i = 0; i < unityVertices.Length; i++)
+			{
+				float hi = h[i] * scale;
+
+				float abs = Mathf.Abs(hi);
+				if (abs < minAbsHeight)
+					hi = Mathf.Sign(hi) * minAbsHeight;
+
+				unityVertices[i] = basePos[i] + dir * hi;
+			}
+		}
+		else
+		{
+			Debug.LogWarning("Freeform Mesh: Max Abs Error.");
+		}
+
+		List<int> outlineFront = FreeformMesh.ExtractOutline(tMesh, idToIndexMap);
+		FreeformMesh.AppendSideWalls(outlineFront, halfCount, triList);
+
+		int[] finalTris = triList.ToArray();
+
+		Mesh m = new Mesh();
+		m.vertices = unityVertices;
+		m.triangles = finalTris;
+		m.RecalculateNormals();
+		m.RecalculateBounds();
+		return m;
+	}
+
 	private Mesh BuildBoxMesh(List<Vector2Int> corners, float depth, Vector3 centerPoint)
 	{
 		Vector3 bl = P2W(corners[0]);
@@ -646,7 +820,7 @@ public class SketchToMesh : MonoBehaviour
 			default:                            // TriPrism, Pyramid, etc.
 				var mc = go.AddComponent<MeshCollider>();
 				mc.sharedMesh = m;
-				mc.convex = true;            // needed for non-static objects
+				mc.convex = false; // We are only concerned about static objects
 				break;
 		}
 	}

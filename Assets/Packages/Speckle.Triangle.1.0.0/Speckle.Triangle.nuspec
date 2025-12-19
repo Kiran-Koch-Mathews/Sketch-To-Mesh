@@ -1,0 +1,15 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2012/06/nuspec.xsd">
+  <metadata>
+    <id>Speckle.Triangle</id>
+    <version>1.0.0</version>
+    <title>Speckle.Triangle.NET</title>
+    <authors>Christian Woltering</authors>
+    <icon>logo.png</icon>
+    <description>Speckle's fork of Triangle.NET</description>
+    <repository type="git" url="https://github.com/specklesystems/Triangle.NET" />
+    <dependencies>
+      <group targetFramework=".NETStandard2.0" />
+    </dependencies>
+  </metadata>
+</package>
