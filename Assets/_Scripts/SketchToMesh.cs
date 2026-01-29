@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using TriangleNet.Geometry;
 using TriangleNet.Meshing;
@@ -125,6 +126,7 @@ public class SketchToMesh : MonoBehaviour
 
 			case ShapeType.Freeform:
 				List<Vector2> cleanedSilhouette = FreeformMesh.ResamplePath(orderedPath, 10f);
+				print("Resampling reduced to " + cleanedSilhouette.Count + " points from " + orderedPath.Count);
 				shapeMesh = BuildFreeformMesh(cleanedSilhouette, centerPoint);
 				break;
 		}
@@ -236,45 +238,109 @@ public class SketchToMesh : MonoBehaviour
 	}
 
 	#region Helpers
-	const float approxScalar = 3.5f;
-
 	int ApproxCornerCount(List<Vector2Int> outline)
 	{
-		var hull = ConvexHull(outline);                       // already defined
-		float angT = 30f;                                     // deg. change that signals a corner
-		float distT = sketchingTool.BrushSize * 2f;           // merge radius (≈ stroke width)
-		List<Vector2> cand = new(), corners = new();
-		int n = hull.Count;
-		for (int i = 0; i < n; i++)
-		{
-			Vector2 a = hull[(i - 1 + n) % n] - hull[i],
-					 b = hull[(i + 1) % n] - hull[i];
-			if (Vector2.Angle(a, b) > angT) cand.Add(hull[i]);  // raw corner
-		}
-		foreach (var p in cand)                                // merge nearby raw corners
-			if (corners.TrueForAll(c => Vector2.Distance(c, p) > distT))
-				corners.Add(p);
+		List<Vector2> hull = ConvexHull(outline);
+		if (hull == null || hull.Count < 3) return 0;
 
-		return (int)(corners.Count / approxScalar);
+		// Remove noise from hull
+		float epsilon = 10f;
+		List<Vector2> pruned = new List<Vector2> { hull[0] };
+
+		for (int i = 1; i < hull.Count; i++)
+		{
+			if (Vector2.Distance(pruned[pruned.Count - 1], hull[i]) > epsilon)
+				pruned.Add(hull[i]);
+		}
+
+		// Look for sharp deviations.
+		float angleThreshold = 140f;
+		List<Vector2> cand = new();
+
+		if (pruned.Count < 3) return hull.Count; // No Corners, predict a sphere
+
+		for (int i = 0; i < pruned.Count; i++)
+		{
+			//Find the points before and after
+			Vector2 a = pruned[(i - 1 + pruned.Count) % pruned.Count] - pruned[i];
+			Vector2 b = pruned[(i + 1) % pruned.Count] - pruned[i];
+
+			if (Vector2.Angle(a, b) < angleThreshold) //Straight Line is 180
+				cand.Add(pruned[i]);
+		}
+
+		// Ensure there's only one point per corner.
+		float distT = sketchingTool.BrushSize * 4f;
+		List<Vector2> corners = new();
+
+		foreach (var p in cand)
+		{
+			bool isUnique = true;
+			foreach (var c in corners)
+			{
+				if (Vector2.Distance(c, p) < distT)
+				{
+					isUnique = false;
+					break;
+				}
+			}
+
+			if (isUnique) corners.Add(p);
+		}
+
+		if (corners.Count < 3) return hull.Count; // No Corners, predict a sphere
+
+		print("Approximately " + corners.Count + " Corners");
+		return corners.Count;
 	}
+
 	List<Vector2> ConvexHull(List<Vector2Int> pts)
 	{
-		if (pts.Count < 3) return pts.Select(p => (Vector2)p).ToList();
-		var p = pts.Distinct().OrderBy(v => v.x).ThenBy(v => v.y).ToList();
-		List<Vector2> l = new(), u = new();
-		foreach (var t in p)
+		if (pts.Count < 3) return null;
+
+		// Sort
+		List<Vector2Int> sorted = pts.Distinct().OrderBy(p => p.x).ThenBy(p => p.y).ToList();
+
+		// Build the lower hull
+		List<Vector2> lowerHull = new List<Vector2>();
+		foreach (Vector2Int p in sorted)
 		{
-			while (l.Count > 1 && Cross(l[^2], l[^1], t) <= 0) l.RemoveAt(l.Count - 1);
-			l.Add(t);
+			Vector2 current = p;
+
+			while (lowerHull.Count >= 2)
+			{
+				if (CrossProduct(lowerHull[lowerHull.Count - 2], lowerHull[lowerHull.Count - 1], current) > 0)
+					break;
+
+				lowerHull.RemoveAt(lowerHull.Count - 1);
+			}
+
+			lowerHull.Add(current);
 		}
-		for (int i = p.Count - 1; i >= 0; --i)
+
+		// Build the upper hull
+		List<Vector2> upperHull = new List<Vector2>();
+		for (int i = sorted.Count - 1; i >= 0; i--)
 		{
-			var t = p[i];
-			while (u.Count > 1 && Cross(u[^2], u[^1], t) <= 0) u.RemoveAt(u.Count - 1);
-			u.Add(t);
+			Vector2 current = sorted[i];
+
+			while (upperHull.Count >= 2)
+			{
+				if (CrossProduct(upperHull[upperHull.Count - 2], upperHull[upperHull.Count - 1], current) > 0)
+					break;
+
+				upperHull.RemoveAt(upperHull.Count - 1);
+			}
+
+			upperHull.Add(current);
 		}
-		l.RemoveAt(l.Count - 1); u.RemoveAt(u.Count - 1); l.AddRange(u);
-		return l;
+
+		// Combine
+		lowerHull.RemoveAt(lowerHull.Count - 1);
+		upperHull.RemoveAt(upperHull.Count - 1);
+		lowerHull.AddRange(upperHull);
+
+		return lowerHull;
 	}
 
 	private Vector3 FindCenterPoint(List<Vector2Int> absCorners, float distance)
@@ -333,7 +399,13 @@ public class SketchToMesh : MonoBehaviour
 	}
 
 	public Vector3 P2W(Vector2 p) => PixelToWorldPoint(p, currentDistance);
-	private static float Cross(Vector2 o, Vector2 a, Vector2 b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+	private static float CrossProduct(Vector2 origin, Vector2 a, Vector2 b)
+	{
+		var deltaA = a - origin;
+		var deltaB = b - origin;
+
+		return (deltaA.x * deltaB.y) - (deltaA.y * deltaB.x);
+	}
 	#endregion
 
 	#endregion
@@ -346,9 +418,8 @@ public class SketchToMesh : MonoBehaviour
 
 	private Mesh BuildFreeformMesh(List<Vector2> outline, Vector3 centerPoint)
 	{
+		// Triangle.NET creates a connected mesh of triangles from the 2D outline
 		Polygon poly = new Polygon();
-
-		FreeformMesh.RemoveExtraPoints(ref outline);
 		foreach (Vector2 p in outline) 
 			poly.Add(new TriangleNet.Geometry.Vertex(p.x, p.y));
 
@@ -356,6 +427,7 @@ public class SketchToMesh : MonoBehaviour
 		var qualityOptions = new QualityOptions() { MinimumAngle = 25 };
 		var tMesh = (TriangleNet.Mesh)poly.Triangulate(meshOptions, qualityOptions);
 
+		// Find Z-Direction Plane from camera view
 		Vector3 inflationDir = -mainCamera.transform.forward.normalized;
 		Vector3 planeN = inflationDir;
 
@@ -371,13 +443,6 @@ public class SketchToMesh : MonoBehaviour
 
 		halfDepthWorld = Mathf.Max(halfDepthWorld, planarRadius * depthToRadius);
 
-		int halfCount = tMesh.Vertices.Count;
-		Vector3[] unityVertices = new Vector3[halfCount * 2];
-		bool[] pinned = new bool[halfCount * 2];
-
-		Dictionary<int, int> idToIndexMap = new Dictionary<int, int>(halfCount);
-		int currentIndex = 0;
-
 		// Find max distance to the edges
 		float maxDistPixels = 0f;
 		foreach (var v in tMesh.Vertices)
@@ -387,7 +452,12 @@ public class SketchToMesh : MonoBehaviour
 		}
 
 		// Build vertices and smoothing weights
+		int halfCount = tMesh.Vertices.Count;
+		Vector3[] unityVertices = new Vector3[halfCount * 2];
+
 		float[] weights01 = new float[halfCount * 2];
+		Dictionary<int, int> idToIndexMap = new Dictionary<int, int>(halfCount);
+		int currentIndex = 0;
 
 		foreach (var v in tMesh.Vertices)
 		{
@@ -405,20 +475,14 @@ public class SketchToMesh : MonoBehaviour
 			float thickness01 = Mathf.Lerp(boundaryMinThicknessFactor, 1f, domeSoft);
 			float zOffsetWorld = halfDepthWorld * thickness01;
 
-			unityVertices[currentIndex] =
-				(posWorldOnPlane + (inflationDir * zOffsetWorld)) - centerPoint;
-			unityVertices[currentIndex + halfCount] =
-				(posWorldOnPlane - (inflationDir * zOffsetWorld)) - centerPoint;
+			unityVertices[currentIndex] = (posWorldOnPlane + (inflationDir * zOffsetWorld)) - centerPoint;
+			unityVertices[currentIndex + halfCount] = (posWorldOnPlane - (inflationDir * zOffsetWorld)) - centerPoint;
 
 			float t = Mathf.Clamp01(normalizedDist / 0.1f);
 			float w = Mathf.SmoothStep(0f, 1f, t);
 
 			weights01[currentIndex] = w;
 			weights01[currentIndex + halfCount] = w;
-
-			bool isBoundary = distToOutline <= boundaryEpsPixels;
-			pinned[currentIndex] = isBoundary;
-			pinned[currentIndex + halfCount] = isBoundary;
 
 			currentIndex++;
 		}
@@ -477,16 +541,14 @@ public class SketchToMesh : MonoBehaviour
 				unityVertices[i] = basePos[i] + dir * hi;
 			}
 		}
-		else
-		{
-			Debug.LogWarning("Freeform Mesh: Max Abs Error.");
-		}
+		else Debug.LogWarning("Freeform Mesh: Max Abs Error.");
 
 		List<int> outlineFront = FreeformMesh.ExtractOutline(tMesh, idToIndexMap);
-		FreeformMesh.AppendSideWalls(outlineFront, halfCount, triList);
+		FreeformMesh.AppendSideWalls(outlineFront, halfCount, triList, unityVertices);
 
 		int[] finalTris = triList.ToArray();
 
+		// Build Unity Mesh
 		Mesh m = new Mesh();
 		m.vertices = unityVertices;
 		m.triangles = finalTris;
