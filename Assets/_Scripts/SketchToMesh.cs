@@ -6,19 +6,20 @@ using TriangleNet.Meshing;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.UI;
+using static UnityEditor.Searcher.SearcherWindow.Alignment;
+
+public enum ShapeType
+{
+	Box = 0,
+	Sphere = 1,
+	Capsule = 2,
+	TriangularPrism = 3,
+	Pyramid = 4,
+	Freeform = 5
+}
 
 public class SketchToMesh : MonoBehaviour
 {
-	public enum ShapeType
-	{
-		Box = 0,
-		Sphere = 1,
-		Capsule = 2,
-		TriangularPrism = 3,
-		Pyramid = 4,
-		Freeform = 5
-	}
-
 	#region UI
 	public void ToggleObstruction(bool value)
 	{
@@ -63,8 +64,20 @@ public class SketchToMesh : MonoBehaviour
 	[SerializeField] private LayerMask raycastMask = ~0;
 	[SerializeField] bool avoidObstruction = true;
 	[SerializeField] bool forcedShape = true;
+	[Space(8)]
+	[SerializeField] private float resampling = 100f;
 
 	private float currentDistance;
+
+	[Header("Debug")]
+	[SerializeField] private bool showTriangulation = true;
+	[SerializeField] private bool showChordalAxis = true;
+	[SerializeField] private bool showOutline = true;
+
+	// Store the raw Triangle.NET data here so Gizmos can see it
+	private TriangleNet.Mesh debugMesh;
+	private List<SpineSegment> debugSpine;
+	private List<Vector2> debugOutline;
 
 	private void Awake()
 	{
@@ -125,14 +138,14 @@ public class SketchToMesh : MonoBehaviour
 				break;
 
 			case ShapeType.Freeform:
-				List<Vector2> cleanedSilhouette = FreeformMesh.ResamplePath(orderedPath, 10f);
+				List<Vector2> cleanedSilhouette = FreeformMesh.ResamplePath(orderedPath, resampling);
 				print("Resampling reduced to " + cleanedSilhouette.Count + " points from " + orderedPath.Count);
 				shapeMesh = BuildFreeformMesh(cleanedSilhouette, centerPoint);
 				break;
 		}
 
 		mf.mesh = shapeMesh;
-		AddCollider(generatedMeshObject, shapeMesh);
+		if (generatedMeshObject && shapeMesh) AddCollider(generatedMeshObject, shapeMesh);
 	}
 
 	#region Texture2D Decoding
@@ -420,12 +433,24 @@ public class SketchToMesh : MonoBehaviour
 	{
 		// Triangle.NET creates a connected mesh of triangles from the 2D outline
 		Polygon poly = new Polygon();
-		foreach (Vector2 p in outline) 
-			poly.Add(new TriangleNet.Geometry.Vertex(p.x, p.y));
+
+		List<Vertex> vertices = new List<Vertex>();
+		foreach (Vector2 p in outline)
+		{
+			Vertex point = new Vertex(p.x, p.y);
+
+			poly.Add(point);
+			vertices.Add(point);
+		}
+		poly.Add(new Contour(vertices));
 
 		var meshOptions = new ConstraintOptions() { ConformingDelaunay = true };
-		var qualityOptions = new QualityOptions() { MinimumAngle = 25 };
-		var tMesh = (TriangleNet.Mesh)poly.Triangulate(meshOptions, qualityOptions);
+		var qualityOptions = new QualityOptions() { MinimumAngle = 20 };
+		var tMesh = (TriangleNet.Mesh) poly.Triangulate(meshOptions, qualityOptions);
+
+		debugMesh = tMesh;
+		debugSpine = FreeformMesh.ExtractAxis(tMesh);
+		debugOutline = outline;
 
 		// Find Z-Direction Plane from camera view
 		Vector3 inflationDir = -mainCamera.transform.forward.normalized;
@@ -509,7 +534,10 @@ public class SketchToMesh : MonoBehaviour
 
 		// Apply Smoothing
 		int[] tmpTris = triList.ToArray();
-		unityVertices = FreeformMesh.SmoothAlongDirection(unityVertices, tmpTris, inflationDir, weights01,
+
+		bool smooth = false;
+		if (smooth)
+			unityVertices = FreeformMesh.SmoothAlongDirection(unityVertices, tmpTris, inflationDir, weights01,
 																  iterations: 20, alpha: 0.55f);
 		Vector3 dir = inflationDir.normalized;
 		float maxAbs = 0f;
@@ -542,9 +570,6 @@ public class SketchToMesh : MonoBehaviour
 			}
 		}
 		else Debug.LogWarning("Freeform Mesh: Max Abs Error.");
-
-		List<int> outlineFront = FreeformMesh.ExtractOutline(tMesh, idToIndexMap);
-		FreeformMesh.AppendSideWalls(outlineFront, halfCount, triList, unityVertices);
 
 		int[] finalTris = triList.ToArray();
 
@@ -886,5 +911,68 @@ public class SketchToMesh : MonoBehaviour
 				break;
 		}
 	}
+	#endregion
+
+	#region Debug
+
+	private void OnDrawGizmos()
+	{
+		if (debugMesh == null) return;
+
+		if (showTriangulation)
+		{
+			Gizmos.color = Color.green;
+			foreach (var tri in debugMesh.Triangles)
+			{
+				Vector3 v0 = P2W(new Vector2((float)tri.GetVertex(0).X, (float)tri.GetVertex(0).Y));
+				Vector3 v1 = P2W(new Vector2((float)tri.GetVertex(1).X, (float)tri.GetVertex(1).Y));
+				Vector3 v2 = P2W(new Vector2((float)tri.GetVertex(2).X, (float)tri.GetVertex(2).Y));
+
+				Gizmos.DrawLine(v0, v1);
+				Gizmos.DrawLine(v1, v2);
+				Gizmos.DrawLine(v2, v0);
+			}
+		}
+
+		if (showChordalAxis && debugSpine != null)
+		{
+			foreach (var segment in debugSpine)
+			{
+				Vector3 start = P2W(segment.Start);
+				Vector3 end = P2W(segment.End);
+
+				// Color code by triangle type
+				switch (segment.Type)
+				{
+					case TriangleType.Terminal:
+						Gizmos.color = Color.yellow; // Tips
+						break;
+					case TriangleType.Sleeve:
+						Gizmos.color = Color.cyan;   // Body
+						break;
+					case TriangleType.Junction:
+						Gizmos.color = Color.magenta; // Intersections
+						break;
+				}
+
+				Gizmos.DrawLine(start, end);
+
+				// Draw a small sphere at the connection points to see them clearly
+				Gizmos.DrawSphere(start, 0.02f);
+				Gizmos.DrawSphere(end, 0.02f);
+			}
+		}
+
+		if (showOutline)
+		{
+			foreach (var p in debugOutline)
+			{
+				Vector3 wp = P2W(p);
+				Gizmos.color = Color.red;
+				Gizmos.DrawSphere(wp, 0.01f);
+			}
+		}
+	}
+
 	#endregion
 }

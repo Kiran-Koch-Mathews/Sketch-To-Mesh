@@ -2,6 +2,14 @@
 using System.Linq;
 using UnityEngine;
 
+public enum TriangleType { Terminal, Sleeve, Junction }
+public struct SpineSegment
+{
+	public Vector2 Start;
+	public Vector2 End;
+	public TriangleType Type;
+}
+
 public static class FreeformMesh
 {
 	// Simplify Texture2D outline to ordered list of pixels, for better Mesh generation
@@ -9,29 +17,43 @@ public static class FreeformMesh
 	{
 		if (rawPixels.Count < 10) return new List<Vector2Int>();
 
-		List<Vector2Int> sortedPath = new List<Vector2Int>();
 		HashSet<Vector2Int> pixelSet = new HashSet<Vector2Int>(rawPixels);
+		HashSet<Vector2Int> edgePixels = new HashSet<Vector2Int>();
 
-		Vector2Int current = rawPixels[0];
+		Vector2Int startPixel = rawPixels[0];
+		int minY = int.MaxValue;
+
+		foreach (var p in rawPixels)
+		{
+			if (!pixelSet.Contains(p + Vector2Int.up) ||
+				!pixelSet.Contains(p + Vector2Int.down) ||
+				!pixelSet.Contains(p + Vector2Int.left) ||
+				!pixelSet.Contains(p + Vector2Int.right))
+			{
+				edgePixels.Add(p);
+				if (p.y < minY) { minY = p.y; startPixel = p; }
+			}
+		}
+
+		List<Vector2Int> sortedPath = new List<Vector2Int>();
+		Vector2Int current = startPixel;
 		sortedPath.Add(current);
-		pixelSet.Remove(current);
+		edgePixels.Remove(current);
 
-		// Nearest-Neighbor tracing
-		while (pixelSet.Count > 0)
+		while (edgePixels.Count > 0)
 		{
 			Vector2Int bestNeighbor = Vector2Int.zero;
 			float minDst = float.MaxValue;
 			bool found = false;
 
-			// Check a 3x3 grid for neighbors
-			for (int y = -1; y <= 1; y++)
+			// Look in a slightly wider 5x5 area to bridge small gaps
+			for (int y = -2; y <= 2; y++)
 			{
-				for (int x = -1; x <= 1; x++)
+				for (int x = -2; x <= 2; x++)
 				{
 					if (x == 0 && y == 0) continue;
-
 					Vector2Int neighbor = current + new Vector2Int(x, y);
-					if (pixelSet.Contains(neighbor))
+					if (edgePixels.Contains(neighbor))
 					{
 						float d = Vector2.Distance(current, neighbor);
 						if (d < minDst)
@@ -44,25 +66,14 @@ public static class FreeformMesh
 				}
 			}
 
-			if (!found)
+			if (found)
 			{
-				float globalMin = float.MaxValue;
-				foreach (var p in pixelSet)
-				{
-					float d = Vector2.Distance(current, p);
-					if (d < globalMin)
-					{
-						globalMin = d;
-						bestNeighbor = p;
-					}
-				}
+				current = bestNeighbor;
+				sortedPath.Add(current);
+				edgePixels.Remove(current);
 			}
-
-			current = bestNeighbor;
-			sortedPath.Add(current);
-			pixelSet.Remove(current);
+			else break;
 		}
-
 		return sortedPath;
 	}
 
@@ -70,39 +81,31 @@ public static class FreeformMesh
 	// Also removes jitter and helps runtime
 	public static List<Vector2> ResamplePath(List<Vector2Int> inputPath, float interval)
 	{
-		// Convert to Vector2, so we can normalize the Vectors
-		List<Vector2> vecPath = new List<Vector2>();
-		foreach (var p in inputPath)
-			vecPath.Add(new Vector2(p.x, p.y));
-
-		// Maybe just a click
-		if (vecPath.Count < 2) return vecPath;
+		if (inputPath.Count < 2) return inputPath.Select(p => (Vector2)p).ToList();
 
 		List<Vector2> cleanPath = new List<Vector2>();
-		cleanPath.Add(vecPath[0]);
+		Vector2 current = new Vector2(inputPath[0].x, inputPath[0].y);
+		cleanPath.Add(current);
 
-		float accumulatedDist = 0f;
-		for (int i = 0; i < vecPath.Count - 1; i++)
+		int inputIndex = 1;
+		while (inputIndex < inputPath.Count)
 		{
-			Vector2 p1 = vecPath[i];
-			Vector2 p2 = vecPath[i + 1];
-			float d = Vector2.Distance(p1, p2);
+			Vector2 nextTarget = new Vector2(inputPath[inputIndex].x, inputPath[inputIndex].y);
+			float d = Vector2.Distance(current, nextTarget);
 
-			if (accumulatedDist + d >= interval)
+			if (d >= interval)
 			{
-				float remaining = interval - accumulatedDist;
-				Vector2 newPoint = p1 + (p2 - p1).normalized * remaining;
-
-				cleanPath.Add(newPoint);
-
-				vecPath.Insert(i + 1, newPoint);
-				accumulatedDist = 0f;
+				Vector2 dir = (nextTarget - current).normalized;
+				current = current + dir * interval;
+				cleanPath.Add(current);
 			}
-			else 
-				accumulatedDist += d;
+			else
+			{
+				inputIndex++;
+			}
 		}
 
-		if (Vector2.Distance(cleanPath[0], cleanPath[cleanPath.Count - 1]) > interval)
+		if (Vector2.Distance(cleanPath[0], cleanPath[cleanPath.Count - 1]) > interval * 0.5f)
 			cleanPath.Add(cleanPath[0]);
 
 		return cleanPath;
@@ -125,111 +128,99 @@ public static class FreeformMesh
 		return minDst;
 	}
 
-	#region Side Wall Generation
-	public static List<int> ExtractOutline(TriangleNet.Mesh tMesh, Dictionary<int, int> idToIndexMap)
+	#region Chordal Axis
+	private static Vector2 GetEdgeMidpoint(TriangleNet.Topology.Triangle tri, int i)
 	{
-		Dictionary<int, List<int>> adj = new Dictionary<int, List<int>>();
+		// Edge i is between vertex (i+1)%3 and (i+2)%3
+		var v1 = tri.GetVertex((i + 1) % 3);
+		var v2 = tri.GetVertex((i + 2) % 3);
+		return new Vector2((float)(v1.X + v2.X) * 0.5f, (float)(v1.Y + v2.Y) * 0.5f);
+	}
 
-		foreach (var tri in tMesh.Triangles)
+	// Helper: Get the position of the vertex opposite to edge i
+	private static Vector2 GetVertexPos(TriangleNet.Topology.Triangle tri, int i)
+	{
+		// The vertex opposite edge i is simply vertex i
+		var v = tri.GetVertex(i);
+		return new Vector2((float)v.X, (float)v.Y);
+	}
+
+	private static Vector2 GetTriangleCentroid(TriangleNet.Topology.Triangle tri)
+	{
+		var v0 = tri.GetVertex(0);
+		var v1 = tri.GetVertex(1);
+		var v2 = tri.GetVertex(2);
+		return new Vector2(
+			(float)(v0.X + v1.X + v2.X) / 3f,
+			(float)(v0.Y + v1.Y + v2.Y) / 3f
+		);
+	}
+
+	public static List<SpineSegment> ExtractAxis(TriangleNet.Mesh mesh)
+	{
+		List<SpineSegment> segments = new List<SpineSegment>();
+
+		foreach (var tri in mesh.Triangles)
 		{
+			// 1. Identify Internal Edges
+			// In Triangle.NET, GetNeighbor(i) returns null if that edge is on the mesh boundary
+			List<int> internalEdgeIndices = new List<int>();
 			for (int i = 0; i < 3; i++)
 			{
-				// In Triangle.NET, the edge i is between vertices (i+1)%3 and (i+2)%3
-				if (tri.GetNeighbor(i) == null)
+				if (tri.GetNeighbor(i) != null)
 				{
-					int u = tri.GetVertex((i + 1) % 3).ID;
-					int v = tri.GetVertex((i + 2) % 3).ID;
+					internalEdgeIndices.Add(i);
+				}
+			}
 
-					if (!adj.TryGetValue(u, out var lu)) adj[u] = lu = new List<int>(2);
-					if (!adj.TryGetValue(v, out var lv)) adj[v] = lv = new List<int>(2);
+			// 2. Classify and Build Segments
+			int neighborCount = internalEdgeIndices.Count;
 
-					lu.Add(v);
-					lv.Add(u);
+			if (neighborCount == 1) // TERMINAL
+			{
+				// Connect the midpoint of the internal edge to the opposite vertex
+				int edgeIndex = internalEdgeIndices[0];
+				Vector2 midPoint = GetEdgeMidpoint(tri, edgeIndex);
+				Vector2 oppositeVertex = GetVertexPos(tri, edgeIndex); // Vertex opposite to the edge
+
+				segments.Add(new SpineSegment
+				{
+					Start = midPoint,
+					End = oppositeVertex,
+					Type = TriangleType.Terminal
+				});
+			}
+			else if (neighborCount == 2) // SLEEVE
+			{
+				// Connect the midpoints of the two internal edges
+				Vector2 mid1 = GetEdgeMidpoint(tri, internalEdgeIndices[0]);
+				Vector2 mid2 = GetEdgeMidpoint(tri, internalEdgeIndices[1]);
+
+				segments.Add(new SpineSegment
+				{
+					Start = mid1,
+					End = mid2,
+					Type = TriangleType.Sleeve
+				});
+			}
+			else if (neighborCount == 3) // JUNCTION
+			{
+				// Connect the center of the triangle to the midpoints of all 3 edges
+				Vector2 center = GetTriangleCentroid(tri);
+
+				foreach (int edgeIndex in internalEdgeIndices)
+				{
+					segments.Add(new SpineSegment
+					{
+						Start = center,
+						End = GetEdgeMidpoint(tri, edgeIndex),
+						Type = TriangleType.Junction
+					});
 				}
 			}
 		}
 
-		// Safety check
-		if (adj.Count == 0)
-		{
-			Debug.LogWarning("ExtractOutline: No boundary edges found in the mesh.");
-			return new List<int>();
-		}
-
-		int start = adj.Keys.Min();
-		int prev = -1;
-		int cur = start;
-
-		List<int> loop = new List<int>(adj.Count);
-		int safety = adj.Count + 10;
-
-		while (safety > 0)
-		{
-			loop.Add(cur);
-			var nbs = adj[cur];
-
-			// Pick the neighbor that isn't the one we just came from
-			int next = (nbs.Count > 1 && nbs[0] == prev) ? nbs[1] : nbs[0];
-
-			prev = cur;
-			cur = next;
-
-			if (cur == start) break;
-			safety--;
-		}
-
-		// Safety Check
-		if (safety == 0)
-		{
-			Debug.LogWarning("ExtractOutline: Boundary loop extraction hit safety limit.");
-			return new List<int>();
-		}
-
-		// Convert Triangle.NET IDs to Unity indices
-		List<int> unityLoop = new List<int>(loop.Count);
-		foreach (int id in loop)
-			unityLoop.Add(idToIndexMap[id]);
-
-		return unityLoop;
-	}
-
-	public static void AppendSideWalls(List<int> boundaryLoopFront, int halfCount, List<int> tris, Vector3[] vertices)
-	{
-		int n = boundaryLoopFront.Count;
-		// Calculate the geometric center of the rim to determine "outward"
-		Vector3 meshCenter = Vector3.zero;
-		foreach (int idx in boundaryLoopFront) 
-			meshCenter += vertices[idx];
-
-		meshCenter /= n;
-
-		for (int i = 0; i < n; i++)
-		{
-			int aF = boundaryLoopFront[i];
-			int bF = boundaryLoopFront[(i + 1) % n];
-			int aB = aF + halfCount;
-			int bB = bF + halfCount;
-
-			Vector3 sideCenter = (vertices[aF] + vertices[bF]) * 0.5f;
-			Vector3 toSide = (sideCenter - meshCenter).normalized;
-
-			// Calculate the normal of the triangle we are about to make
-			Vector3 v1 = vertices[bF] - vertices[aF];
-			Vector3 v2 = vertices[aB] - vertices[aF];
-			Vector3 normal = Vector3.Cross(v1, v2).normalized;
-
-			// If the normal points inward (toward center), flip the winding
-			if (Vector3.Dot(normal, toSide) < 0)
-			{
-				tris.Add(aF); tris.Add(aB); tris.Add(bF);
-				tris.Add(bF); tris.Add(aB); tris.Add(bB);
-			}
-			else
-			{
-				tris.Add(aF); tris.Add(bF); tris.Add(aB);
-				tris.Add(bF); tris.Add(bB); tris.Add(aB);
-			}
-		}
+		return segments;
 	}
 	#endregion
 
@@ -317,6 +308,114 @@ public static class FreeformMesh
 			vertices[i] = basePos[i] + dir * h[i];
 
 		return vertices;
+	}
+	#endregion
+
+	#region Side Wall Generation
+	public static List<int> ExtractOutline(TriangleNet.Mesh tMesh, Dictionary<int, int> idToIndexMap)
+	{
+		Dictionary<int, List<int>> adj = new Dictionary<int, List<int>>();
+
+		foreach (var tri in tMesh.Triangles)
+		{
+			for (int i = 0; i < 3; i++)
+			{
+				// In Triangle.NET, the edge i is between vertices (i+1)%3 and (i+2)%3
+				if (tri.GetNeighbor(i) == null)
+				{
+					int u = tri.GetVertex((i + 1) % 3).ID;
+					int v = tri.GetVertex((i + 2) % 3).ID;
+
+					if (!adj.TryGetValue(u, out var lu)) adj[u] = lu = new List<int>(2);
+					if (!adj.TryGetValue(v, out var lv)) adj[v] = lv = new List<int>(2);
+
+					lu.Add(v);
+					lv.Add(u);
+				}
+			}
+		}
+
+		// Safety check
+		if (adj.Count == 0)
+		{
+			Debug.LogWarning("ExtractOutline: No boundary edges found in the mesh.");
+			return new List<int>();
+		}
+
+		int start = adj.Keys.Min();
+		int prev = -1;
+		int cur = start;
+
+		List<int> loop = new List<int>(adj.Count);
+		int safety = adj.Count + 10;
+
+		while (safety > 0)
+		{
+			loop.Add(cur);
+			var nbs = adj[cur];
+
+			// Pick the neighbor that isn't the one we just came from
+			int next = (nbs.Count > 1 && nbs[0] == prev) ? nbs[1] : nbs[0];
+
+			prev = cur;
+			cur = next;
+
+			if (cur == start) break;
+			safety--;
+		}
+
+		// Safety Check
+		if (safety == 0)
+		{
+			Debug.LogWarning("ExtractOutline: Boundary loop extraction hit safety limit.");
+			return new List<int>();
+		}
+
+		// Convert Triangle.NET IDs to Unity indices
+		List<int> unityLoop = new List<int>(loop.Count);
+		foreach (int id in loop)
+			unityLoop.Add(idToIndexMap[id]);
+
+		return unityLoop;
+	}
+
+	public static void AppendSideWalls(List<int> boundaryLoopFront, int halfCount, List<int> tris, Vector3[] vertices)
+	{
+		int n = boundaryLoopFront.Count;
+		// Calculate the geometric center of the rim to determine "outward"
+		Vector3 meshCenter = Vector3.zero;
+		foreach (int idx in boundaryLoopFront)
+			meshCenter += vertices[idx];
+
+		meshCenter /= n;
+
+		for (int i = 0; i < n; i++)
+		{
+			int aF = boundaryLoopFront[i];
+			int bF = boundaryLoopFront[(i + 1) % n];
+			int aB = aF + halfCount;
+			int bB = bF + halfCount;
+
+			Vector3 sideCenter = (vertices[aF] + vertices[bF]) * 0.5f;
+			Vector3 toSide = (sideCenter - meshCenter).normalized;
+
+			// Calculate the normal of the triangle we are about to make
+			Vector3 v1 = vertices[bF] - vertices[aF];
+			Vector3 v2 = vertices[aB] - vertices[aF];
+			Vector3 normal = Vector3.Cross(v1, v2).normalized;
+
+			// If the normal points inward (toward center), flip the winding
+			if (Vector3.Dot(normal, toSide) < 0)
+			{
+				tris.Add(aF); tris.Add(aB); tris.Add(bF);
+				tris.Add(bF); tris.Add(aB); tris.Add(bB);
+			}
+			else
+			{
+				tris.Add(aF); tris.Add(bF); tris.Add(aB);
+				tris.Add(bF); tris.Add(bB); tris.Add(aB);
+			}
+		}
 	}
 	#endregion
 }
