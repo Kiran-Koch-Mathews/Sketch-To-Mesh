@@ -2,7 +2,12 @@
 using System.Linq;
 using UnityEngine;
 
-public enum TriangleType { Terminal, Sleeve, Junction }
+public enum TriangleType 
+{ 
+	Terminal,
+	Sleeve,
+	Junction
+}
 public struct SpineSegment
 {
 	public Vector2 Start;
@@ -15,14 +20,16 @@ public static class FreeformMesh
 	// Simplify Texture2D outline to ordered list of pixels, for better Mesh generation
 	public static List<Vector2Int> TraceOutline(List<Vector2Int> rawPixels)
 	{
+		// Maybe a misclick, ignore
 		if (rawPixels.Count < 10) return new List<Vector2Int>();
 
 		HashSet<Vector2Int> pixelSet = new HashSet<Vector2Int>(rawPixels);
 		HashSet<Vector2Int> edgePixels = new HashSet<Vector2Int>();
 
 		Vector2Int startPixel = rawPixels[0];
-		int minY = int.MaxValue;
+		int minX = int.MaxValue;
 
+		// Filter out inner pixels
 		foreach (var p in rawPixels)
 		{
 			if (!pixelSet.Contains(p + Vector2Int.up) ||
@@ -31,7 +38,11 @@ public static class FreeformMesh
 				!pixelSet.Contains(p + Vector2Int.right))
 			{
 				edgePixels.Add(p);
-				if (p.y < minY) { minY = p.y; startPixel = p; }
+				if (p.x < minX) 
+				{ 
+					minX = p.x; 
+					startPixel = p;
+				}
 			}
 		}
 
@@ -40,25 +51,29 @@ public static class FreeformMesh
 		sortedPath.Add(current);
 		edgePixels.Remove(current);
 
+		//The Brush Width is greater than the distance from each outer pixel,
+		//so it will only trace the outer edge
 		while (edgePixels.Count > 0)
 		{
 			Vector2Int bestNeighbor = Vector2Int.zero;
-			float minDst = float.MaxValue;
+			float minDist = float.MaxValue;
 			bool found = false;
 
-			// Look in a slightly wider 5x5 area to bridge small gaps
+			//Hard-coded 5x5 search for next pixel
+			//Could switch for brush radius later
 			for (int y = -2; y <= 2; y++)
 			{
 				for (int x = -2; x <= 2; x++)
 				{
 					if (x == 0 && y == 0) continue;
+
 					Vector2Int neighbor = current + new Vector2Int(x, y);
 					if (edgePixels.Contains(neighbor))
 					{
 						float d = Vector2.Distance(current, neighbor);
-						if (d < minDst)
+						if (d < minDist)
 						{
-							minDst = d;
+							minDist = d;
 							bestNeighbor = neighbor;
 							found = true;
 						}
@@ -81,30 +96,28 @@ public static class FreeformMesh
 	// Also removes jitter and helps runtime
 	public static List<Vector2> ResamplePath(List<Vector2Int> inputPath, float interval)
 	{
-		if (inputPath.Count < 2) return inputPath.Select(p => (Vector2)p).ToList();
+		if (inputPath.Count < 2) return null;
 
 		List<Vector2> cleanPath = new List<Vector2>();
 		Vector2 current = new Vector2(inputPath[0].x, inputPath[0].y);
 		cleanPath.Add(current);
 
-		int inputIndex = 1;
-		while (inputIndex < inputPath.Count)
+		int i = 1;
+		while (i < inputPath.Count)
 		{
-			Vector2 nextTarget = new Vector2(inputPath[inputIndex].x, inputPath[inputIndex].y);
+			Vector2 nextTarget = new Vector2(inputPath[i].x, inputPath[i].y);
 			float d = Vector2.Distance(current, nextTarget);
 
 			if (d >= interval)
 			{
 				Vector2 dir = (nextTarget - current).normalized;
-				current = current + dir * interval;
+				current = current + dir * interval; //Ensure exact spacing
 				cleanPath.Add(current);
 			}
-			else
-			{
-				inputIndex++;
-			}
+			else i++;
 		}
 
+		// Ensure a closed loop
 		if (Vector2.Distance(cleanPath[0], cleanPath[cleanPath.Count - 1]) > interval * 0.5f)
 			cleanPath.Add(cleanPath[0]);
 
@@ -129,20 +142,17 @@ public static class FreeformMesh
 	}
 
 	#region Chordal Axis
+	private static Vector2 GetVertexPos(TriangleNet.Topology.Triangle tri, int i)
+	{
+		var v = tri.GetVertex(i);
+		return new Vector2((float)v.X, (float)v.Y);
+	}
+
 	private static Vector2 GetEdgeMidpoint(TriangleNet.Topology.Triangle tri, int i)
 	{
-		// Edge i is between vertex (i+1)%3 and (i+2)%3
 		var v1 = tri.GetVertex((i + 1) % 3);
 		var v2 = tri.GetVertex((i + 2) % 3);
 		return new Vector2((float)(v1.X + v2.X) * 0.5f, (float)(v1.Y + v2.Y) * 0.5f);
-	}
-
-	// Helper: Get the position of the vertex opposite to edge i
-	private static Vector2 GetVertexPos(TriangleNet.Topology.Triangle tri, int i)
-	{
-		// The vertex opposite edge i is simply vertex i
-		var v = tri.GetVertex(i);
-		return new Vector2((float)v.X, (float)v.Y);
 	}
 
 	private static Vector2 GetTriangleCentroid(TriangleNet.Topology.Triangle tri)
@@ -150,10 +160,10 @@ public static class FreeformMesh
 		var v0 = tri.GetVertex(0);
 		var v1 = tri.GetVertex(1);
 		var v2 = tri.GetVertex(2);
-		return new Vector2(
-			(float)(v0.X + v1.X + v2.X) / 3f,
-			(float)(v0.Y + v1.Y + v2.Y) / 3f
-		);
+
+		float centerX = (float)(v0.X + v1.X + v2.X) / 3f;
+		float centerY = (float)(v0.Y + v1.Y + v2.Y) / 3f;
+		return new Vector2(centerX, centerY);
 	}
 
 	public static List<SpineSegment> ExtractAxis(TriangleNet.Mesh mesh)
@@ -162,61 +172,47 @@ public static class FreeformMesh
 
 		foreach (var tri in mesh.Triangles)
 		{
-			// 1. Identify Internal Edges
-			// In Triangle.NET, GetNeighbor(i) returns null if that edge is on the mesh boundary
 			List<int> internalEdgeIndices = new List<int>();
 			for (int i = 0; i < 3; i++)
 			{
-				if (tri.GetNeighbor(i) != null)
+				if (tri.GetNeighbor(i) != null) // null = mesh boundary
 				{
 					internalEdgeIndices.Add(i);
 				}
 			}
 
-			// 2. Classify and Build Segments
 			int neighborCount = internalEdgeIndices.Count;
 
-			if (neighborCount == 1) // TERMINAL
+			switch (neighborCount)
 			{
-				// Connect the midpoint of the internal edge to the opposite vertex
-				int edgeIndex = internalEdgeIndices[0];
-				Vector2 midPoint = GetEdgeMidpoint(tri, edgeIndex);
-				Vector2 oppositeVertex = GetVertexPos(tri, edgeIndex); // Vertex opposite to the edge
+				case 1: // TERMINAL
 
-				segments.Add(new SpineSegment
-				{
-					Start = midPoint,
-					End = oppositeVertex,
-					Type = TriangleType.Terminal
-				});
-			}
-			else if (neighborCount == 2) // SLEEVE
-			{
-				// Connect the midpoints of the two internal edges
-				Vector2 mid1 = GetEdgeMidpoint(tri, internalEdgeIndices[0]);
-				Vector2 mid2 = GetEdgeMidpoint(tri, internalEdgeIndices[1]);
+					// Connect the midpoint of the internal edge to the opposite vertex
+					int edgeIndex = internalEdgeIndices[0];
+					Vector2 midPoint = GetEdgeMidpoint(tri, edgeIndex);
+					Vector2 oppositeVertex = GetVertexPos(tri, edgeIndex);
 
-				segments.Add(new SpineSegment
-				{
-					Start = mid1,
-					End = mid2,
-					Type = TriangleType.Sleeve
-				});
-			}
-			else if (neighborCount == 3) // JUNCTION
-			{
-				// Connect the center of the triangle to the midpoints of all 3 edges
-				Vector2 center = GetTriangleCentroid(tri);
+					segments.Add(new SpineSegment{ Start = midPoint, End = oppositeVertex, Type = TriangleType.Terminal });
+					break;
+				
+				case 2: // SLEEVE
+					// Connect the midpoints of the two internal edges
+					Vector2 mid1 = GetEdgeMidpoint(tri, internalEdgeIndices[0]);
+					Vector2 mid2 = GetEdgeMidpoint(tri, internalEdgeIndices[1]);
 
-				foreach (int edgeIndex in internalEdgeIndices)
-				{
-					segments.Add(new SpineSegment
+					segments.Add(new SpineSegment{ Start = mid1, End = mid2, Type = TriangleType.Sleeve });
+					break;
+
+				default: // JUNCTION
+					// Connect the center of the triangle to the midpoints of all 3 edges
+					Vector2 center = GetTriangleCentroid(tri);
+
+					foreach (int e in internalEdgeIndices)
 					{
-						Start = center,
-						End = GetEdgeMidpoint(tri, edgeIndex),
-						Type = TriangleType.Junction
-					});
-				}
+						Vector2 end = GetEdgeMidpoint(tri, e);
+						segments.Add(new SpineSegment{ Start = center, End = end, Type = TriangleType.Junction });
+					}
+					break;
 			}
 		}
 

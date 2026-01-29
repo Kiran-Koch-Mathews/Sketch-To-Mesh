@@ -549,9 +549,9 @@ MonoBehaviour:
     m_Bits: 4294967295
   avoidObstruction: 1
   forcedShape: 1
-  resampling: 100
+  resampling: 25
   showTriangulation: 0
-  showChordalAxis: 0
+  showChordalAxis: 1
   showOutline: 1
 --- !u!1 &465483698
 GameObject:

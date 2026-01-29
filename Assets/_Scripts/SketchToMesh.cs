@@ -444,6 +444,20 @@ public class SketchToMesh : MonoBehaviour
 		}
 		poly.Add(new Contour(vertices));
 
+		/*
+		for (int i = 0; i < outline.Count; i++) {
+			Vertex point = new Vertex(outline[i].x, outline[i].y);
+			poly.Add(point);
+
+			if (i == outline.Count - 1) {
+				poly.Add(new Segment(point, new Vertex(outline[0].x, outline[0].y)));
+			}
+			else {
+				poly.Add(new Segment(point, new Vertex(outline[i + 1].x, outline[i + 1].y)));
+			}
+		}
+		*/
+
 		var meshOptions = new ConstraintOptions() { ConformingDelaunay = true };
 		var qualityOptions = new QualityOptions() { MinimumAngle = 20 };
 		var tMesh = (TriangleNet.Mesh) poly.Triangulate(meshOptions, qualityOptions);
@@ -451,7 +465,8 @@ public class SketchToMesh : MonoBehaviour
 		debugMesh = tMesh;
 		debugSpine = FreeformMesh.ExtractAxis(tMesh);
 		debugOutline = outline;
-
+		
+		//FIXME: OLD DOME LOGIC
 		// Find Z-Direction Plane from camera view
 		Vector3 inflationDir = -mainCamera.transform.forward.normalized;
 		Vector3 planeN = inflationDir;
@@ -532,13 +547,6 @@ public class SketchToMesh : MonoBehaviour
 			triList.Add(id2 + halfCount);
 		}
 
-		// Apply Smoothing
-		int[] tmpTris = triList.ToArray();
-
-		bool smooth = false;
-		if (smooth)
-			unityVertices = FreeformMesh.SmoothAlongDirection(unityVertices, tmpTris, inflationDir, weights01,
-																  iterations: 20, alpha: 0.55f);
 		Vector3 dir = inflationDir.normalized;
 		float maxAbs = 0f;
 		float[] h = new float[unityVertices.Length];
@@ -569,7 +577,7 @@ public class SketchToMesh : MonoBehaviour
 				unityVertices[i] = basePos[i] + dir * hi;
 			}
 		}
-		else Debug.LogWarning("Freeform Mesh: Max Abs Error.");
+		else Debug.LogWarning("Freeform Mesh: Max Abs Error. No inflation.");
 
 		int[] finalTris = triList.ToArray();
 
@@ -914,7 +922,6 @@ public class SketchToMesh : MonoBehaviour
 	#endregion
 
 	#region Debug
-
 	private void OnDrawGizmos()
 	{
 		if (debugMesh == null) return;
@@ -941,23 +948,20 @@ public class SketchToMesh : MonoBehaviour
 				Vector3 start = P2W(segment.Start);
 				Vector3 end = P2W(segment.End);
 
-				// Color code by triangle type
 				switch (segment.Type)
 				{
 					case TriangleType.Terminal:
-						Gizmos.color = Color.yellow; // Tips
+						Gizmos.color = Color.yellow;
 						break;
 					case TriangleType.Sleeve:
-						Gizmos.color = Color.cyan;   // Body
+						Gizmos.color = Color.cyan;
 						break;
 					case TriangleType.Junction:
-						Gizmos.color = Color.magenta; // Intersections
+						Gizmos.color = Color.magenta;
 						break;
 				}
 
 				Gizmos.DrawLine(start, end);
-
-				// Draw a small sphere at the connection points to see them clearly
 				Gizmos.DrawSphere(start, 0.02f);
 				Gizmos.DrawSphere(end, 0.02f);
 			}

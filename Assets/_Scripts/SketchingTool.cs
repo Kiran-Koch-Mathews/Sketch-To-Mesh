@@ -18,6 +18,7 @@ public class SketchingTool : MonoBehaviour
 	#region Drawing
 	[Header("Drawing Settings")]
 	[SerializeField] private Color drawColor = Color.black;
+	[Range(2, 5)]
 	[SerializeField] private int brushSize = 5;
 	public int BrushSize => brushSize;
 	[SerializeField] private Transform sketchCollector;
