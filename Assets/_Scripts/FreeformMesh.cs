@@ -1,6 +1,7 @@
 ﻿using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
+using TriangleNet.Geometry;
 
 public enum TriangleType 
 { 
@@ -139,6 +140,46 @@ public static class FreeformMesh
 			if (d < minDst) minDst = d;
 		}
 		return minDst;
+	}
+
+	public static List<Vertex> GetSpineVertices(TriangleNet.Mesh mesh)
+	{
+		List<Vertex> spinePoints = new List<Vertex>();
+		HashSet<Vector2> processedPoints = new HashSet<Vector2>();
+
+		foreach (var tri in mesh.Triangles)
+		{
+			int boundaryEdges = 0;
+			List<int> internalEdges = new List<int>();
+
+			for (int i = 0; i < 3; i++)
+			{
+				if (tri.GetNeighbor(i) == null) boundaryEdges++;
+				else internalEdges.Add(i);
+			}
+
+			if (boundaryEdges == 2 || boundaryEdges == 1) // Terminal (2 Boundary, 1 Internal) or Sleeve (1 Boundary, 2 Internal)
+			{
+				foreach (int edgeIndex in internalEdges)
+				{
+					Vector2 mid = GetEdgeMidpoint(tri, edgeIndex);
+					if (processedPoints.Add(mid)) // Only add if new
+					{
+						// Mark as '1' to identify as Spine later
+						spinePoints.Add(new Vertex(mid.x, mid.y, 1));
+					}
+				}
+			}
+			else if (boundaryEdges == 0) // Junction (0 Boundary, 3 Internal)
+			{
+				Vector2 center = GetTriangleCentroid(tri);
+				if (processedPoints.Add(center))
+				{
+					spinePoints.Add(new Vertex(center.x, center.y, 1));
+				}
+			}
+		}
+		return spinePoints;
 	}
 
 	#region Chordal Axis

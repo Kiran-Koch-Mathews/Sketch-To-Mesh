@@ -1,6 +1,16 @@
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.UI;
+
+
+[System.Serializable]
+public class SketchData
+{
+	public List<Vector2> points = new List<Vector2>();
+}
 
 public enum DeletionFrame
 {
@@ -14,6 +24,10 @@ public class SketchingTool : MonoBehaviour
 	[Header("References")]
 	[SerializeField] private SketchToMesh sketchToMesh;
 	[SerializeField] private RawImage rawImage;
+
+	[Header("Save/Load Settings")]
+	[SerializeField] private string saveFolderName = "SavedSketches";
+	public string currentFileName = "MySketch";
 
 	#region Drawing
 	[Header("Drawing Settings")]
@@ -54,6 +68,94 @@ public class SketchingTool : MonoBehaviour
 	{
 		return texture;
 	}
+
+	#region Save & Load
+	//TextField OnValueChanged
+	public void SetFileName(string name)
+	{
+		currentFileName = name;
+	}
+
+	//Button OnClick
+	public void SaveSketch()
+	{
+		List<Vector2> points = sketchToMesh.LastCalculatedOutline;
+
+		if (points == null || points.Count == 0)
+		{
+			Debug.LogWarning("No outline data found to save. Draw a shape first.");
+			return;
+		}
+
+		string directory = Path.Combine(Application.dataPath, saveFolderName);
+		if (!Directory.Exists(directory)) Directory.CreateDirectory(directory);
+		string fullPath = Path.Combine(directory, currentFileName + ".csv");
+
+		StringBuilder sb = new StringBuilder();
+		sb.AppendLine("X,Y");
+
+		foreach (Vector2 p in points)
+		{
+			sb.AppendLine($"{p.x.ToString(System.Globalization.CultureInfo.InvariantCulture)},{p.y.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+		}
+
+		File.WriteAllText(fullPath, sb.ToString());
+		Debug.Log($"Saved {points.Count} points to: {fullPath}");
+	}
+
+	public void LoadSketch()
+	{
+		string fullPath = Path.Combine(Application.dataPath, saveFolderName, currentFileName + ".csv");
+
+		if (!File.Exists(fullPath))
+		{
+			Debug.LogWarning($"File not found: {fullPath}");
+			return;
+		}
+
+		List<Vector2> loadedPoints = new List<Vector2>();
+		string[] lines = File.ReadAllLines(fullPath);
+
+		for (int i = 1; i < lines.Length; i++)
+		{
+			string line = lines[i];
+			if (string.IsNullOrWhiteSpace(line)) continue;
+
+			string[] parts = line.Split(',');
+			if (parts.Length == 2)
+			{
+				if (float.TryParse(parts[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float x) &&
+					float.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float y))
+				{
+					loadedPoints.Add(new Vector2(x, y));
+				}
+			}
+		}
+
+		if (loadedPoints.Count > 1)
+		{
+			ClearCanvas();
+			DrawLoadedOutline(loadedPoints);
+
+			sketchToMesh.SetOutline(loadedPoints);
+			//TODO: ADD OPTION TO GENERATE MESH FROM LOADED SKETCH
+			sketchToMesh.GenerateLoadedMesh(loadedPoints);
+
+			Debug.Log($"Loaded and redrew {loadedPoints.Count} points.");
+		}
+	}
+
+	private void DrawLoadedOutline(List<Vector2> points)
+	{
+		for (int i = 0; i < points.Count; i++)
+		{
+			Vector2 start = points[i];
+			Vector2 end = points[(i + 1) % points.Count];
+			DrawLine(texture, start, end);
+		}
+		texture.Apply();
+	}
+	#endregion
 	#endregion
 
 	#region Start Settings
@@ -100,8 +202,12 @@ public class SketchingTool : MonoBehaviour
 	}
 	#endregion
 
+	private bool KeepDrawing = true;
+	public void Setactivedraw(bool draw) { KeepDrawing = draw; }
 	private void Update()
 	{
+		if (!KeepDrawing) return;
+
 		bool isRightMousePressed = Mouse.current.rightButton.wasPressedThisFrame;
 		bool isRightMouseHeld = Mouse.current.rightButton.isPressed;
 		bool isLeftMousePressed = Mouse.current.leftButton.wasPressedThisFrame;
@@ -118,7 +224,8 @@ public class SketchingTool : MonoBehaviour
 			else
 			{
 				int lastIndex = sketchCollector.childCount - 1;
-				Destroy(sketchCollector.GetChild(lastIndex).gameObject);
+				if (lastIndex >= 0)
+					Destroy(sketchCollector.GetChild(lastIndex).gameObject);
 			}
 
 			ClearCanvas();

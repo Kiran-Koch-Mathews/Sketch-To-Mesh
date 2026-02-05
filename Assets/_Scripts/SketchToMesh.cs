@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using NUnit;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using TriangleNet.Geometry;
@@ -6,7 +7,6 @@ using TriangleNet.Meshing;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.UI;
-using static UnityEditor.Searcher.SearcherWindow.Alignment;
 
 public enum ShapeType
 {
@@ -67,21 +67,29 @@ public class SketchToMesh : MonoBehaviour
 	[Space(8)]
 	[SerializeField] private float resampling = 100f;
 
-	private float currentDistance;
+	private float currentDistance = 5f;
 
 	[Header("Debug")]
 	[SerializeField] private bool showTriangulation = true;
 	[SerializeField] private bool showChordalAxis = true;
 	[SerializeField] private bool showOutline = true;
-
 	// Store the raw Triangle.NET data here so Gizmos can see it
 	private TriangleNet.Mesh debugMesh;
 	private List<SpineSegment> debugSpine;
-	private List<Vector2> debugOutline;
+
+	[Header("Data")]
+	public List<Vector2> LastCalculatedOutline { get; private set; }
+	public void SetOutline(List<Vector2> newOutline) { LastCalculatedOutline = newOutline; }
+
 
 	private void Awake()
 	{
 		mainCamera = Camera.main;
+	}
+
+	public void GenerateLoadedMesh(List<Vector2> points)
+	{
+		BuildFreeformMesh(points, null);
 	}
 
 	public void GenerateMeshFromSketch()
@@ -429,164 +437,118 @@ public class SketchToMesh : MonoBehaviour
 	const float boundaryEpsPixels = 0.75f;
 	const float domePow = 3f;
 
-	private Mesh BuildFreeformMesh(List<Vector2> outline, Vector3 centerPoint)
+
+	private Mesh BuildFreeformMesh(List<Vector2> outline, Vector3? centerPoint)
 	{
+		LastCalculatedOutline = new List<Vector2>(outline);
+
 		// Triangle.NET creates a connected mesh of triangles from the 2D outline
 		Polygon poly = new Polygon();
 
 		List<Vertex> vertices = new List<Vertex>();
 		foreach (Vector2 p in outline)
 		{
-			Vertex point = new Vertex(p.x, p.y);
+			Vertex point = new Vertex(p.x, p.y, 0); // 0 = Boundary
 
 			poly.Add(point);
 			vertices.Add(point);
 		}
 		poly.Add(new Contour(vertices));
 
-		/*
-		for (int i = 0; i < outline.Count; i++) {
-			Vertex point = new Vertex(outline[i].x, outline[i].y);
-			poly.Add(point);
-
-			if (i == outline.Count - 1) {
-				poly.Add(new Segment(point, new Vertex(outline[0].x, outline[0].y)));
-			}
-			else {
-				poly.Add(new Segment(point, new Vertex(outline[i + 1].x, outline[i + 1].y)));
-			}
-		}
-		*/
-
-		var meshOptions = new ConstraintOptions() { ConformingDelaunay = true };
-		var qualityOptions = new QualityOptions() { MinimumAngle = 20 };
-		var tMesh = (TriangleNet.Mesh) poly.Triangulate(meshOptions, qualityOptions);
+		var meshOptions = new ConstraintOptions() { ConformingDelaunay = false, Convex = false };
+		//var qualityOptions = new QualityOptions() { MinimumAngle = 20 };
+		var tMesh = (TriangleNet.Mesh) poly.Triangulate(meshOptions, null);
 
 		debugMesh = tMesh;
 		debugSpine = FreeformMesh.ExtractAxis(tMesh);
-		debugOutline = outline;
-		
-		//FIXME: OLD DOME LOGIC
-		// Find Z-Direction Plane from camera view
+		List<Vertex> spinePoints = FreeformMesh.GetSpineVertices(tMesh);
+
+		if (centerPoint == null) return null;
+		poly = new Polygon();
+
+		// A. Add Boundary (Mark = 0)
+		foreach (Vector2 p in outline)
+			poly.Add(new Vertex(p.x, p.y, 0));
+
+		// B. Add Spine (Mark = 1)
+		foreach (Vertex v in spinePoints)
+			poly.Add(v);
+
+		tMesh = (TriangleNet.Mesh)poly.Triangulate(meshOptions, null);
+		Vector3 center = centerPoint.Value;
 		Vector3 inflationDir = -mainCamera.transform.forward.normalized;
-		Vector3 planeN = inflationDir;
 
-		float scaledDepth = shapeDepth * (currentDistance / meshDistance);
-		float halfDepthWorld = scaledDepth * 0.5f;
-		float planarRadius = 0f;
-		for (int i = 0; i < outline.Count; i++)
-		{
-			Vector3 wp = P2W(outline[i]) - centerPoint;
-			Vector3 planar = wp - planeN * Vector3.Dot(wp, planeN);
-			planarRadius = Mathf.Max(planarRadius, planar.magnitude);
-		}
+		debugMesh = tMesh;
+		debugSpine = FreeformMesh.ExtractAxis(tMesh);
 
-		halfDepthWorld = Mathf.Max(halfDepthWorld, planarRadius * depthToRadius);
-
-		// Find max distance to the edges
+		// Calculate maximum distance for normalizing height
 		float maxDistPixels = 0f;
 		foreach (var v in tMesh.Vertices)
 		{
-			float d = FreeformMesh.GetDistanceToOutline(new Vector2((float)v.X, (float)v.Y), outline);
-			if (d > maxDistPixels) maxDistPixels = d;
+			// Only measure distance for spine points (Mark == 1)
+			if (v.Label == 1)
+			{
+				float d = FreeformMesh.GetDistanceToOutline(new Vector2((float)v.X, (float)v.Y), outline);
+				if (d > maxDistPixels) maxDistPixels = d;
+			}
 		}
+		// Avoid divide by zero
+		if (maxDistPixels < 0.1f) maxDistPixels = 1f;
 
-		// Build vertices and smoothing weights
+		// Create Unity Vertices
 		int halfCount = tMesh.Vertices.Count;
 		Vector3[] unityVertices = new Vector3[halfCount * 2];
-
-		float[] weights01 = new float[halfCount * 2];
-		Dictionary<int, int> idToIndexMap = new Dictionary<int, int>(halfCount);
 		int currentIndex = 0;
+		Dictionary<int, int> idToIndexMap = new Dictionary<int, int>();
+
+		float scaledDepth = shapeDepth * (currentDistance / meshDistance);
 
 		foreach (var v in tMesh.Vertices)
 		{
 			idToIndexMap[v.ID] = currentIndex;
-
 			Vector2 posPixels = new Vector2((float)v.X, (float)v.Y);
 			Vector3 posWorldOnPlane = P2W(posPixels);
 
-			float distToOutline = FreeformMesh.GetDistanceToOutline(posPixels, outline);
-			float normalizedDist = Mathf.Clamp01(distToOutline / maxDistPixels);
+			// FIXME: REMOVE OLD DOME LOGIC
+			// Replace with relative distance from triagle to triangle
+			float zOffsetWorld = 0f;			
+			if (v.Label == 1)
+			{
+				float dist = FreeformMesh.GetDistanceToOutline(posPixels, outline);
+				float ratio = dist / maxDistPixels;
+				float domeHeight = Mathf.Sin(ratio * Mathf.PI * 0.5f);
 
-			float dome = 1f - Mathf.Cos(normalizedDist * Mathf.PI * 0.5f);
-			float domeSoft = Mathf.Pow(dome, domePow);
+				zOffsetWorld = (scaledDepth * 0.5f) * domeHeight;
+			}
 
-			float thickness01 = Mathf.Lerp(boundaryMinThicknessFactor, 1f, domeSoft);
-			float zOffsetWorld = halfDepthWorld * thickness01;
-
-			unityVertices[currentIndex] = (posWorldOnPlane + (inflationDir * zOffsetWorld)) - centerPoint;
-			unityVertices[currentIndex + halfCount] = (posWorldOnPlane - (inflationDir * zOffsetWorld)) - centerPoint;
-
-			float t = Mathf.Clamp01(normalizedDist / 0.1f);
-			float w = Mathf.SmoothStep(0f, 1f, t);
-
-			weights01[currentIndex] = w;
-			weights01[currentIndex + halfCount] = w;
+			// Front Vertex
+			unityVertices[currentIndex] = (posWorldOnPlane + (inflationDir * zOffsetWorld)) - center;
+			// Back Vertex
+			unityVertices[currentIndex + halfCount] = (posWorldOnPlane - (inflationDir * zOffsetWorld)) - center;
 
 			currentIndex++;
 		}
 
-		// Base triangles (front/back)
-		List<int> triList = new List<int>(tMesh.Triangles.Count * 3 * 2 + 4096);
-
+		// Stitch Triangles
+		List<int> triList = new List<int>();
 		foreach (var tri in tMesh.Triangles)
 		{
 			int id0 = idToIndexMap[tri.GetVertex(0).ID];
 			int id1 = idToIndexMap[tri.GetVertex(1).ID];
 			int id2 = idToIndexMap[tri.GetVertex(2).ID];
 
-			// Front
-			triList.Add(id0);
-			triList.Add(id2);
-			triList.Add(id1);
-
-			// Back
-			triList.Add(id0 + halfCount);
-			triList.Add(id1 + halfCount);
-			triList.Add(id2 + halfCount);
+			// Front Face
+			triList.Add(id0); triList.Add(id2); triList.Add(id1);
+			// Back Face
+			triList.Add(id0 + halfCount); triList.Add(id1 + halfCount); triList.Add(id2 + halfCount);
 		}
 
-		Vector3 dir = inflationDir.normalized;
-		float maxAbs = 0f;
-		float[] h = new float[unityVertices.Length];
-		Vector3[] basePos = new Vector3[unityVertices.Length];
-
-		for (int i = 0; i < unityVertices.Length; i++)
-		{
-			float hi = Vector3.Dot(unityVertices[i], dir);
-			h[i] = hi;
-			basePos[i] = unityVertices[i] - dir * hi;
-			maxAbs = Mathf.Max(maxAbs, Mathf.Abs(hi));
-		}
-
-		if (maxAbs > 1e-6f)
-		{
-			// Keep a tiny minimum thickness so side walls never collapse.
-			float scale = halfDepthWorld / maxAbs;
-			float minAbsHeight = halfDepthWorld * boundaryMinThicknessFactor;
-
-			for (int i = 0; i < unityVertices.Length; i++)
-			{
-				float hi = h[i] * scale;
-
-				float abs = Mathf.Abs(hi);
-				if (abs < minAbsHeight)
-					hi = Mathf.Sign(hi) * minAbsHeight;
-
-				unityVertices[i] = basePos[i] + dir * hi;
-			}
-		}
-		else Debug.LogWarning("Freeform Mesh: Max Abs Error. No inflation.");
-
-		int[] finalTris = triList.ToArray();
-
-		// Build Unity Mesh
 		Mesh m = new Mesh();
 		m.vertices = unityVertices;
-		m.triangles = finalTris;
+		m.triangles = triList.ToArray();
 		m.RecalculateNormals();
 		m.RecalculateBounds();
+
 		return m;
 	}
 
@@ -926,6 +888,16 @@ public class SketchToMesh : MonoBehaviour
 	{
 		if (debugMesh == null) return;
 
+		if (showOutline)
+		{
+			foreach (var p in LastCalculatedOutline)
+			{
+				Vector3 wp = P2W(p);
+				Gizmos.color = Color.red;
+				Gizmos.DrawSphere(wp, 0.04f);
+			}
+		}
+
 		if (showTriangulation)
 		{
 			Gizmos.color = Color.green;
@@ -935,9 +907,17 @@ public class SketchToMesh : MonoBehaviour
 				Vector3 v1 = P2W(new Vector2((float)tri.GetVertex(1).X, (float)tri.GetVertex(1).Y));
 				Vector3 v2 = P2W(new Vector2((float)tri.GetVertex(2).X, (float)tri.GetVertex(2).Y));
 
+#if UNITY_EDITOR
+				Handles.color = Gizmos.color;
+				Handles.DrawAAPolyLine(6f, v0, v1);
+				Handles.DrawAAPolyLine(6f, v1, v2);
+				Handles.DrawAAPolyLine(6f, v2, v0);
+#else
 				Gizmos.DrawLine(v0, v1);
 				Gizmos.DrawLine(v1, v2);
 				Gizmos.DrawLine(v2, v0);
+#endif
+
 			}
 		}
 
@@ -951,29 +931,24 @@ public class SketchToMesh : MonoBehaviour
 				switch (segment.Type)
 				{
 					case TriangleType.Terminal:
-						Gizmos.color = Color.yellow;
+						Gizmos.color = Color.black;
 						break;
 					case TriangleType.Sleeve:
-						Gizmos.color = Color.cyan;
+						Gizmos.color = Color.black;
 						break;
 					case TriangleType.Junction:
-						Gizmos.color = Color.magenta;
+						Gizmos.color = Color.black;
 						break;
 				}
 
+				Gizmos.DrawSphere(start, 0.04f);
+				Gizmos.DrawSphere(end, 0.04f);
+#if UNITY_EDITOR
+				Handles.color = Gizmos.color;
+				Handles.DrawAAPolyLine(12f, start, end);
+#else
 				Gizmos.DrawLine(start, end);
-				Gizmos.DrawSphere(start, 0.02f);
-				Gizmos.DrawSphere(end, 0.02f);
-			}
-		}
-
-		if (showOutline)
-		{
-			foreach (var p in debugOutline)
-			{
-				Vector3 wp = P2W(p);
-				Gizmos.color = Color.red;
-				Gizmos.DrawSphere(wp, 0.01f);
+#endif
 			}
 		}
 	}
