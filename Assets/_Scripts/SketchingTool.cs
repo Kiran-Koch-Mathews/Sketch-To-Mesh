@@ -137,8 +137,8 @@ public class SketchingTool : MonoBehaviour
 			ClearCanvas();
 			DrawLoadedOutline(loadedPoints);
 
-			sketchToMesh.SetOutline(loadedPoints);
 			//TODO: ADD OPTION TO GENERATE MESH FROM LOADED SKETCH
+			sketchToMesh.SetOutline(loadedPoints);
 			sketchToMesh.GenerateLoadedMesh(loadedPoints);
 
 			Debug.Log($"Loaded and redrew {loadedPoints.Count} points.");
@@ -202,7 +202,7 @@ public class SketchingTool : MonoBehaviour
 	}
 	#endregion
 
-	private bool KeepDrawing = true;
+	private bool KeepDrawing = false;
 	public void Setactivedraw(bool draw) { KeepDrawing = draw; }
 	private void Update()
 	{
