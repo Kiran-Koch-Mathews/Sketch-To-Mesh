@@ -46,6 +46,7 @@ public class SketchToMesh : MonoBehaviour
 	}
 	#endregion
 
+	#region Fields
 	[Header("References")]
 	[SerializeField] private SketchingTool sketchingTool;
 	[SerializeField] private RawImage rawImage;
@@ -81,17 +82,16 @@ public class SketchToMesh : MonoBehaviour
 	public List<Vector2> LastCalculatedOutline { get; private set; }
 	public void SetOutline(List<Vector2> newOutline) { LastCalculatedOutline = newOutline; }
 
-
 	private void Awake()
 	{
 		mainCamera = Camera.main;
 	}
+	#endregion
 
 	public void GenerateLoadedMesh(List<Vector2> points)
 	{
 		BuildFreeformMesh(points);
 	}
-
 	public void GenerateMeshFromSketch()
 	{
 		Texture2D sketchTex = sketchingTool.GetFinalTexture();
@@ -197,35 +197,6 @@ public class SketchToMesh : MonoBehaviour
 		corners.Add(new Vector2Int(maxPixel.x, maxPixel.y)); // top-right
 
 		return (corners, outlinePixels);
-	}
-
-	private List<Vector2Int> FindBBOX(List<Vector2> points)
-	{
-		List<Vector2Int> corners = new List<Vector2Int>();
-		if (points == null || points.Count == 0) return corners;
-
-		float minX = points[0].x;
-		float maxX = points[0].x;
-		float minY = points[0].y;
-		float maxY = points[0].y;
-
-		foreach (Vector2 p in points)
-		{
-			if (p.x < minX) minX = p.x;
-			if (p.x > maxX) maxX = p.x;
-			if (p.y < minY) minY = p.y;
-			if (p.y > maxY) maxY = p.y;
-		}
-
-		Vector2Int minPixel = new Vector2Int(Mathf.FloorToInt(minX), Mathf.FloorToInt(minY));
-		Vector2Int maxPixel = new Vector2Int(Mathf.CeilToInt(maxX), Mathf.CeilToInt(maxY));
-
-		corners.Add(new Vector2Int(minPixel.x, minPixel.y)); // bottom-left
-		//corners.Add(new Vector2Int(maxPixel.x, minPixel.y)); // bottom-right
-		//corners.Add(new Vector2Int(minPixel.x, maxPixel.y)); // top-left
-		corners.Add(new Vector2Int(maxPixel.x, maxPixel.y)); // top-right
-
-		return corners;
 	}
 
 	private List<Vector2Int> FindCorners(Texture2D tex, List<Vector2Int> absCorners, List<Vector2Int> outlinePixels)
@@ -343,7 +314,6 @@ public class SketchToMesh : MonoBehaviour
 		print("Approximately " + corners.Count + " Corners");
 		return corners.Count;
 	}
-
 	List<Vector2> ConvexHull(List<Vector2Int> pts)
 	{
 		if (pts.Count < 3) return null;
@@ -465,9 +435,8 @@ public class SketchToMesh : MonoBehaviour
 	{
 		LastCalculatedOutline = new List<Vector2>(outline);
 
-		// STEP 1: Triangle.NET creates a connected mesh of triangles from the 2D outline (CDT)
+		// Triangle.NET creates a connected mesh of triangles from the 2D outline (CDT)
 		Polygon poly = new Polygon();
-
 		List<Vertex> vertices = new List<Vertex>();
 		foreach (Vector2 p in outline)
 		{
@@ -479,105 +448,27 @@ public class SketchToMesh : MonoBehaviour
 
 		var meshOptions = new ConstraintOptions() { ConformingDelaunay = false, Convex = false };
 		var tMesh = (TriangleNet.Mesh)poly.Triangulate(meshOptions, null);
-		Debug.Log($"[STEP 1] CDT created {tMesh.Vertices.Count} vertices and {tMesh.Triangles.Count} triangles");
+		Debug.Log($"CDT created {tMesh.Vertices.Count} vertices and {tMesh.Triangles.Count} triangles");
 
-		// STEP 2: Extract the raw chordal axis (spine)
+		// Extract the raw chordal axis (spine)
 		List<SpineSegment> rawSpine = FreeformMesh.ExtractAxis(tMesh);
-		Debug.Log($"[STEP 2] Raw spine has {rawSpine.Count} segments");
+		Debug.Log($"Chordal axis has {rawSpine.Count} segments");
 
-		// STEP 3: Prune insignificant branches from the spine
-		List<SpineSegment> prunedSpine = FreeformMesh.PruneBranches(rawSpine, outline, 0.6f);
-		Debug.Log($"[STEP 3] Pruned spine has {prunedSpine.Count} segments (removed {rawSpine.Count - prunedSpine.Count})");
+		// Prune insignificant branches from the spine
+		List<SpineSegment> prunedSpine = FreeformMesh.PruneBranches(tMesh);
+		Debug.Log($"Pruned spine has {prunedSpine.Count} segments (removed {rawSpine.Count - prunedSpine.Count})");
 
-		// STEP 4: Fan triangulation and retriangulation
+		// Fan triangulation and retriangulation
 		tMesh = FreeformMesh.RetriangulateMeshAroundSpine(tMesh, prunedSpine, outline);
-		Debug.Log($"[STEP 4] Retriangulated mesh has {tMesh.Vertices.Count} vertices and {tMesh.Triangles.Count} triangles");
+		Debug.Log($"Retriangulated mesh has {tMesh.Vertices.Count} vertices and {tMesh.Triangles.Count} triangles");
 
 		debugMesh = tMesh;
 		debugSpine = prunedSpine;
 
-		// STEP 5: Build ID to Index map for Unity mesh
-		Dictionary<int, int> idToIndexMap = FreeformMesh.BuildIdToIndexMap(tMesh);
-		Debug.Log($"[STEP 5] ID to Index map has {idToIndexMap.Count} entries");
-
-		// STEP 6: Calculate elevations for inflation
-		Dictionary<int, float> elevations = FreeformMesh.CalculateElevations(tMesh, prunedSpine, outline);
-		Debug.Log($"[STEP 6] Calculated elevations for {elevations.Count} vertices");
-
-		// STEP 7: Build the final inflated mesh
-		Mesh finalMesh = BuildInflatedMesh(ref tMesh, elevations, idToIndexMap);
-		Debug.Log($"[STEP 7] Built final mesh with {finalMesh.vertexCount} vertices");
-
-		return finalMesh;
+		return null;
 	}
 
-	public static Mesh BuildInflatedMesh(ref TriangleNet.Mesh triangleMesh, Dictionary<int, float> elevations, Dictionary<int, int> idToIndexMap)
-	{
-		// 1. Create vertices with elevation
-		int vertexCount = triangleMesh.Vertices.Count;
-		Vector3[] frontVertices = new Vector3[vertexCount];
-
-		int idx = 0;
-		foreach (var vertex in triangleMesh.Vertices)
-		{
-			Vector2 pos2D = new Vector2((float)vertex.X, (float)vertex.Y);
-			float elevation = elevations[vertex.ID];
-
-			// Front face: elevation goes in +Z direction
-			frontVertices[idx] = new Vector3(pos2D.x, pos2D.y, elevation);
-			idx++;
-		}
-
-		// 2. Create back vertices (mirrored or offset)
-		Vector3[] allVertices = new Vector3[vertexCount * 2];
-		for (int i = 0; i < vertexCount; i++)
-		{
-			allVertices[i] = frontVertices[i]; // Front
-			allVertices[i + vertexCount] = new Vector3(
-				frontVertices[i].x,
-				frontVertices[i].y,
-				-frontVertices[i].z // Mirror in Z
-			);
-		}
-
-		// 3. Create triangles (front + back + sides)
-		List<int> triangles = new List<int>();
-
-		// Front face triangles
-		foreach (var tri in triangleMesh.Triangles)
-		{
-			int a = idToIndexMap[tri.GetVertex(0).ID];
-			int b = idToIndexMap[tri.GetVertex(1).ID];
-			int c = idToIndexMap[tri.GetVertex(2).ID];
-
-			triangles.Add(a);
-			triangles.Add(b);
-			triangles.Add(c);
-		}
-
-		// Back face triangles (reversed winding)
-		foreach (var tri in triangleMesh.Triangles)
-		{
-			int a = idToIndexMap[tri.GetVertex(0).ID] + vertexCount;
-			int b = idToIndexMap[tri.GetVertex(1).ID] + vertexCount;
-			int c = idToIndexMap[tri.GetVertex(2).ID] + vertexCount;
-
-			triangles.Add(a);
-			triangles.Add(c); // Reversed
-			triangles.Add(b);
-		}
-
-		// 5. Create mesh
-		Mesh mesh = new Mesh();
-		mesh.vertices = allVertices;
-		mesh.triangles = triangles.ToArray();
-		mesh.vertices = allVertices;
-		mesh.RecalculateNormals();
-		mesh.RecalculateBounds();
-
-		return mesh;
-	}
-
+	#region Primitives
 	private Mesh BuildBoxMesh(List<Vector2Int> corners, float depth, Vector3 centerPoint)
 	{
 		Vector3 bl = P2W(corners[0]);
@@ -647,7 +538,6 @@ public class SketchToMesh : MonoBehaviour
 		m.RecalculateBounds();
 		return m;
 	}
-
 	private Mesh BuildSphereMesh(List<Vector2Int> corners, Vector3 centerPoint)
 	{
 		Vector3 bl = P2W(corners[0]);
@@ -908,6 +798,7 @@ public class SketchToMesh : MonoBehaviour
 				break;
 		}
 	}
+	#endregion
 	#endregion
 
 	#region Debug
