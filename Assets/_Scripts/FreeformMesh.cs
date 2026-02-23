@@ -442,7 +442,6 @@ public static class FreeformMesh
 		{
 			ConformingDelaunay = false,
 			Convex = false,
-			SegmentSplitting = 0, //No automatic splitting of segments
 		};
 
 		// Unique List of spine points
@@ -459,7 +458,7 @@ public static class FreeformMesh
 		var currentPoly = BuildPolygon(boundaryPoints, spinePoints, prunedSpine, allFixingPairs);
 		var currentMesh = (TriangleNet.Mesh)currentPoly.Triangulate(meshOptions, null);
 
-		const int maxIterations = 30; // Safety
+		const int maxIterations = 100; // Safety
 		for (int iter = 0; iter < maxIterations; iter++)
 		{
 			// Pass allFixingPairs so we don't propose the same diagonal twice
@@ -514,38 +513,32 @@ public static class FreeformMesh
 				int nl2 = ClassifyVertex(n2, spinePoints, boundaryPoints);
 
 				if ((nl0 == 1 && nl1 == 1 && nl2 == 1) ||
-					(nl0 == 0 && nl1 == 0 && nl2 == 0))
-					continue;
+					(nl0 == 0 && nl1 == 0 && nl2 == 0)) continue;
 
-				Vertex apexInBad = tri.GetVertex(i);
+				Vertex apex = tri.GetVertex(i);
 				Vertex sharedA = tri.GetVertex((i + 1) % 3);
 				Vertex sharedB = tri.GetVertex((i + 2) % 3);
-				Vertex apexInNeighbor = FindUnsharedVertex(new[] { n0, n1, n2 }, sharedA, sharedB);
+				Vertex unsharedVertex = FindUnsharedVertex(new[] { n0, n1, n2 }, sharedA, sharedB);
 
-				if (apexInNeighbor == null)
-					continue;
+				if (unsharedVertex == null) continue;
 
-				int badApexLabel = ClassifyVertex(apexInBad, spinePoints, boundaryPoints);
-				int neighborApexLabel = ClassifyVertex(apexInNeighbor, spinePoints, boundaryPoints);
+				int badApexLabel = ClassifyVertex(apex, spinePoints, boundaryPoints);
+				int neighborApexLabel = ClassifyVertex(unsharedVertex, spinePoints, boundaryPoints);
 
-				if (badApexLabel == neighborApexLabel)
-					continue;
+				if (badApexLabel == neighborApexLabel) continue;
 
-				Vector2 spinePos = ToVector2(badApexLabel == 1 ? apexInBad : apexInNeighbor);
-				Vector2 boundaryPos = ToVector2(badApexLabel == 1 ? apexInNeighbor : apexInBad);
+				Vector2 spinePos = ToVector2(badApexLabel == 1 ? apex : unsharedVertex);
+				Vector2 boundaryPos = ToVector2(badApexLabel == 1 ? unsharedVertex : apex);
 
 				bool alreadyTried = existingPairs.Exists(p =>
 					Vector2.Distance(p.spine, spinePos) < 0.001f &&
 					Vector2.Distance(p.boundary, boundaryPos) < 0.001f);
 
-				if (alreadyTried) continue; // Move to the next neighbor instead of getting stuck
+				if (alreadyTried) continue;
 
 				// Reject this diagonal if it crosses any existing spine segment
 				if (DiagonalCrossesConstraint(spinePos, boundaryPos, prunedSpine))
-				{
-					Debug.LogWarning($"Diagonal {spinePos}→{boundaryPos} crosses a spine constraint — trying next neighbor.");
 					continue;
-				}
 
 				return (spinePos, boundaryPos);
 			}
@@ -553,7 +546,6 @@ public static class FreeformMesh
 
 		return null;
 	}
-
 
 	private static bool DiagonalCrossesConstraint(Vector2 a, Vector2 b, List<SpineSegment> prunedSpine)
 	{
@@ -570,7 +562,7 @@ public static class FreeformMesh
 
 		return false;
 	}
-	
+
 	private static Polygon BuildPolygon(List<Vector2> boundaryPoints, List<Vector2> spinePoints, List<SpineSegment> prunedSpine, List<(Vector2 spine, Vector2 boundary)> fixingPairs)
 	{
 		var poly = new Polygon();

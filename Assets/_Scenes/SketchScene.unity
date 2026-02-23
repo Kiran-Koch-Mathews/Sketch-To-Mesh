@@ -679,7 +679,7 @@ MonoBehaviour:
   resampling: 100
   showTriangulation: 1
   showChordalAxis: 1
-  showOutline: 1
+  showOutline: 0
   pruneBranches: 1
 --- !u!1 &465483698
 GameObject:
