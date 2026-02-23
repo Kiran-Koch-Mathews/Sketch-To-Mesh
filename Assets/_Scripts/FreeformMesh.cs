@@ -1,5 +1,7 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Xml.Schema;
 using TriangleNet.Geometry;
 using TriangleNet.Topology;
 using UnityEngine;
@@ -442,6 +444,7 @@ public static class FreeformMesh
 		{
 			ConformingDelaunay = false,
 			Convex = false,
+			SegmentSplitting = 0 // Only use Spine
 		};
 
 		// Unique List of spine points
@@ -461,7 +464,6 @@ public static class FreeformMesh
 		const int maxIterations = 100; // Safety
 		for (int iter = 0; iter < maxIterations; iter++)
 		{
-			// Pass allFixingPairs so we don't propose the same diagonal twice
 			var newPair = FindOneFixingDiagonal(currentMesh, spinePoints, boundaryPoints, prunedSpine, allFixingPairs);
 
 			if (newPair == null)
@@ -473,6 +475,15 @@ public static class FreeformMesh
 			allFixingPairs.Add(newPair.Value);
 			Debug.Log($"Iteration {iter + 1}: adding diagonal {newPair.Value.spine} → {newPair.Value.boundary}");
 
+			var newPoly = BuildPolygon(boundaryPoints, spinePoints, prunedSpine, allFixingPairs);
+			currentMesh = (TriangleNet.Mesh)newPoly.Triangulate(meshOptions, null);
+		}
+
+		var midPointPair = FindMidPointVertex(currentMesh, spinePoints, boundaryPoints, prunedSpine, allFixingPairs);
+		if (midPointPair != null)
+		{
+			Debug.Log($"Adding final diagonal from midpoint vertex: {midPointPair.Value.spine} → {midPointPair.Value.boundary}");
+			allFixingPairs.Add(midPointPair.Value);
 			var newPoly = BuildPolygon(boundaryPoints, spinePoints, prunedSpine, allFixingPairs);
 			currentMesh = (TriangleNet.Mesh)newPoly.Triangulate(meshOptions, null);
 		}
@@ -520,15 +531,20 @@ public static class FreeformMesh
 				Vertex sharedB = tri.GetVertex((i + 2) % 3);
 				Vertex unsharedVertex = FindUnsharedVertex(new[] { n0, n1, n2 }, sharedA, sharedB);
 
-				if (unsharedVertex == null) continue;
+				if (unsharedVertex == null)
+				{
+					Debug.LogWarning($"Could not find unshared vertex for triangle {neighbor.ID} neighbor of {tri.ID}");
+					continue;
+				}
 
-				int badApexLabel = ClassifyVertex(apex, spinePoints, boundaryPoints);
-				int neighborApexLabel = ClassifyVertex(unsharedVertex, spinePoints, boundaryPoints);
+				int apexLabel = ClassifyVertex(apex, spinePoints, boundaryPoints);
+				int unsharedLabel = ClassifyVertex(unsharedVertex, spinePoints, boundaryPoints);
 
-				if (badApexLabel == neighborApexLabel) continue;
+				// They should be different, otherwise this edge is not a candidate for fixing
+				if (apexLabel == unsharedLabel) continue;
 
-				Vector2 spinePos = ToVector2(badApexLabel == 1 ? apex : unsharedVertex);
-				Vector2 boundaryPos = ToVector2(badApexLabel == 1 ? unsharedVertex : apex);
+				Vector2 spinePos = ToVector2(apexLabel == 1 ? apex : unsharedVertex);
+				Vector2 boundaryPos = ToVector2(apexLabel == 1 ? unsharedVertex : apex);
 
 				bool alreadyTried = existingPairs.Exists(p =>
 					Vector2.Distance(p.spine, spinePos) < 0.001f &&
@@ -547,11 +563,70 @@ public static class FreeformMesh
 		return null;
 	}
 
+	private static (Vector2 spine, Vector2 boundary)? FindMidPointVertex(
+		TriangleNet.Mesh mesh, List<Vector2> spinePoints, List<Vector2> boundaryPoints,
+		List<SpineSegment> prunedSpine, List<(Vector2 spine, Vector2 boundary)> existingPairs)
+	{
+		bool IsPointOnSegment(Vector2 pt, Vector2 a, Vector2 b)
+		{
+			return Mathf.Abs(Vector2.Distance(a, pt) + Vector2.Distance(pt, b) - Vector2.Distance(a, b)) < 0.001f;
+		}
+
+		foreach (var tri in mesh.Triangles)
+		{
+			Vertex v0 = tri.GetVertex(0);
+			Vertex v1 = tri.GetVertex(1);
+			Vertex v2 = tri.GetVertex(2);
+
+			Vector2 p0 = ToVector2(v0);
+			Vector2 p1 = ToVector2(v1);
+			Vector2 p2 = ToVector2(v2);
+
+			// Each edge paired with the vertex opposite to it
+			var edges = new (Vector2 a, Vector2 b, Vector2 opp, Vertex oppV)[]
+			{
+				(p0, p1, p2, v2),
+				(p1, p2, p0, v0),
+				(p2, p0, p1, v1),
+			};
+
+			foreach (var spinePos in spinePoints)
+			{
+				// Skip spine vertices that are already a corner of this triangle
+				if (Vector2.Distance(spinePos, p0) < 0.001f ||
+					Vector2.Distance(spinePos, p1) < 0.001f ||
+					Vector2.Distance(spinePos, p2) < 0.001f)
+					continue;
+
+				foreach (var (a, b, opp, oppV) in edges)
+				{
+					if (!IsPointOnSegment(spinePos, a, b)) continue;
+
+					// Find Opposite Boundary Point
+					int oppLabel = ClassifyVertex(oppV, spinePoints, boundaryPoints);
+					if (oppLabel != 0) continue;
+
+					Vector2 boundaryPos = opp;
+
+					bool alreadyTried = existingPairs.Exists(p =>
+						Vector2.Distance(p.spine, spinePos) < 0.001f &&
+						Vector2.Distance(p.boundary, boundaryPos) < 0.001f);
+					if (alreadyTried) continue;
+
+					if (DiagonalCrossesConstraint(spinePos, boundaryPos, prunedSpine)) continue;
+
+					return (spinePos, boundaryPos);
+				}
+			}
+		}
+
+		return null;
+	}
+
 	private static bool DiagonalCrossesConstraint(Vector2 a, Vector2 b, List<SpineSegment> prunedSpine)
 	{
 		foreach (var spine in prunedSpine)
 		{
-			// Skip if they share an endpoint — that's not a crossing
 			if (Vector2.Distance(a, spine.Start) < 0.001f || Vector2.Distance(a, spine.End) < 0.001f ||
 				Vector2.Distance(b, spine.Start) < 0.001f || Vector2.Distance(b, spine.End) < 0.001f)
 				continue;
