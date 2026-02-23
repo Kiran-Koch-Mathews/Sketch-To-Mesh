@@ -3,9 +3,10 @@ using System.Linq;
 using TriangleNet.Geometry;
 using TriangleNet.Topology;
 using UnityEngine;
+using static System.Math;
 
-public enum TriangleType 
-{ 
+public enum TriangleType
+{
 	Terminal,
 	Sleeve,
 	Junction
@@ -59,9 +60,9 @@ public static class FreeformMesh
 				!pixelSet.Contains(p + Vector2Int.right))
 			{
 				edgePixels.Add(p);
-				if (p.x < minX) 
-				{ 
-					minX = p.x; 
+				if (p.x < minX)
+				{
+					minX = p.x;
 					startPixel = p;
 				}
 			}
@@ -163,20 +164,20 @@ public static class FreeformMesh
 	#endregion
 
 	#region Chordal Axis
-	private static Vector2 GetVertexPos(TriangleNet.Topology.Triangle tri, int i)
+	private static Vector2 GetVertexPos(Triangle tri, int i)
 	{
 		var v = tri.GetVertex(i);
 		return new Vector2((float)v.X, (float)v.Y);
 	}
 
-	private static Vector2 GetEdgeMidpoint(TriangleNet.Topology.Triangle tri, int i)
+	private static Vector2 GetEdgeMidpoint(Triangle tri, int i)
 	{
 		var v1 = tri.GetVertex((i + 1) % 3);
 		var v2 = tri.GetVertex((i + 2) % 3);
 		return new Vector2((float)(v1.X + v2.X) * 0.5f, (float)(v1.Y + v2.Y) * 0.5f);
 	}
 
-	private static Vector2 GetTriangleCentroid(TriangleNet.Topology.Triangle tri)
+	private static Vector2 GetTriangleCentroid(Triangle tri)
 	{
 		var v0 = tri.GetVertex(0);
 		var v1 = tri.GetVertex(1);
@@ -193,13 +194,13 @@ public static class FreeformMesh
 
 		foreach (var tri in mesh.Triangles)
 		{
+			// Skip pruned triangles if provided
 			if (prunedIds != null && prunedIds.Contains(tri.ID)) continue;
 
 			List<int> internalEdgeIndices = new List<int>();
 			for (int i = 0; i < 3; i++)
 			{
 				var neighbor = tri.GetNeighbor(i);
-				// A neighbor is internal if it exists AND hasn't been pruned
 				if (neighbor != null && (prunedIds == null || !prunedIds.Contains(neighbor.ID)))
 				{
 					internalEdgeIndices.Add(i);
@@ -207,22 +208,45 @@ public static class FreeformMesh
 			}
 
 			int neighborCount = internalEdgeIndices.Count;
-
 			switch (neighborCount)
 			{
-				case 1:
+				case 1: // Terminal
 					int edgeIndex = internalEdgeIndices[0];
-					segments.Add(new SpineSegment { Start = GetEdgeMidpoint(tri, edgeIndex), End = GetVertexPos(tri, edgeIndex), Type = TriangleType.Terminal });
+					Vector2 terminalEnd;
+					if (prunedIds != null)
+					{
+						int prunedEdgeIdx = -1;
+						for (int i = 0; i < 3; i++)
+						{
+							var nb = tri.GetNeighbor(i);
+							if (nb != null && prunedIds.Contains(nb.ID))
+							{
+								prunedEdgeIdx = i;
+								break;
+							}
+						}
+						terminalEnd = (prunedEdgeIdx >= 0) ? GetEdgeMidpoint(tri, prunedEdgeIdx) : GetVertexPos(tri, edgeIndex);
+					}
+					else
+					{
+						terminalEnd = GetVertexPos(tri, edgeIndex);
+					}
+
+					segments.Add(new SpineSegment { Start = GetEdgeMidpoint(tri, edgeIndex), End = terminalEnd, Type = TriangleType.Terminal });
 					break;
 
-				case 2:
+				case 2: // Sleeve
 					segments.Add(new SpineSegment { Start = GetEdgeMidpoint(tri, internalEdgeIndices[0]), End = GetEdgeMidpoint(tri, internalEdgeIndices[1]), Type = TriangleType.Sleeve });
 					break;
 
-				case 3:
+				case 3: // Junction
 					Vector2 center = GetTriangleCentroid(tri);
 					foreach (int e in internalEdgeIndices)
 						segments.Add(new SpineSegment { Start = center, End = GetEdgeMidpoint(tri, e), Type = TriangleType.Junction });
+					break;
+
+				default:
+					Debug.LogWarning($"Triangle {tri.ID} has unexpected neighbor count: {neighborCount}");
 					break;
 			}
 		}
@@ -246,8 +270,7 @@ public static class FreeformMesh
 
 		return idToIndexMap;
 	}
-
-	private static TriangleType GetTriangleType(TriangleNet.Topology.Triangle t)
+	private static TriangleType GetTriangleType(Triangle t)
 	{
 		int neighbors = 0;
 		for (int i = 0; i < 3; i++)
@@ -261,7 +284,8 @@ public static class FreeformMesh
 
 		return TriangleType.Terminal; // Safety
 	}
-	private static bool GetSharedEdge(TriangleNet.Topology.Triangle t1, TriangleNet.Topology.Triangle t2, out Vector2 v1, out Vector2 v2)
+
+	private static bool GetSharedEdge(Triangle t1, Triangle t2, out Vector2 v1, out Vector2 v2)
 	{
 		// Find the two vertices shared by t1 and t2
 		List<Vertex> shared = new List<Vertex>();
@@ -290,244 +314,309 @@ public static class FreeformMesh
 		v2 = Vector2.zero;
 		return false;
 	}
+
+	private static bool SegmentsIntersect(Vector2 p1, Vector2 p2, Vector2 p3, Vector2 p4)
+	{
+		float d1 = Cross(p3, p4, p1);
+		float d2 = Cross(p3, p4, p2);
+		float d3 = Cross(p1, p2, p3);
+		float d4 = Cross(p1, p2, p4);
+
+		if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+			((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0)))
+			return true;
+
+		return false;
+	}
+
+	private static float Cross(Vector2 o, Vector2 a, Vector2 b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+	private static Vector2 ToVector2(Vertex v) => new Vector2((float)v.X, (float)v.Y);
+
+	private static int ClassifyVertex(Vertex v, List<Vector2> spinePoints, List<Vector2> boundaryPoints)
+	{
+		const float eps = 0.001f;
+		Vector2 pos = ToVector2(v);
+
+		foreach (var b in boundaryPoints)
+			if (Vector2.Distance(pos, b) < eps) return 0;
+
+		foreach (var s in spinePoints)
+			if (Vector2.Distance(pos, s) < eps) return 1;
+
+		return -1; // Unknown / error case
+	}
+
+	private static Vertex FindUnsharedVertex(Vertex[] verts, Vertex sharedA, Vertex sharedB)
+	{
+		const float eps = 0.001f;
+		foreach (var v in verts)
+		{
+			bool matchA = Mathf.Abs((float)(v.X - sharedA.X)) < eps &&
+						  Mathf.Abs((float)(v.Y - sharedA.Y)) < eps;
+			bool matchB = Mathf.Abs((float)(v.X - sharedB.X)) < eps &&
+						  Mathf.Abs((float)(v.Y - sharedB.Y)) < eps;
+			if (!matchA && !matchB)
+				return v;
+		}
+		return null;
+	}
 	#endregion
 
 	public static List<SpineSegment> PruneBranches(TriangleNet.Mesh mesh)
 	{
-        HashSet<int> prunedIds = new HashSet<int>();
+		HashSet<int> prunedIds = new HashSet<int>();
 
-        var terminals = mesh.Triangles.Where(t => GetTriangleType(t) == TriangleType.Terminal).ToList();
+		var terminals = mesh.Triangles.Where(t => GetTriangleType(t) == TriangleType.Terminal).ToList();
+		foreach (var terminal in terminals)
+		{
+			if (prunedIds.Contains(terminal.ID)) continue;
+			List<Triangle> region = new List<Triangle> { terminal };
+			HashSet<Vector2> regionVerts = new HashSet<Vector2>(new Vector2EqualityComparer());
+			for (int i = 0; i < 3; i++)
+				regionVerts.Add(GetVertexPos(terminal, i));
 
-        foreach (var t in terminals)
-        {
-            if (prunedIds.Contains(t.ID)) continue; //Somehow reached another terminal triangle
+			Triangle curr = terminal;
+			Triangle prev = null;
 
-            // Trace the branch inwards
-            List<Triangle> branch = new List<Triangle>();
-            Triangle curr = t;
-            Triangle prev = null;
-            Triangle junction = null;
-            bool hitJunction = false;
-
-            int safety = 0;
-            while (safety++ < 1000)
-            {
-                branch.Add(curr);
-
-                // Find the next internal neighbor that isn't 'prev'
-                Triangle next = null;
-                for (int i = 0; i < 3; i++)
-                {
-                    Triangle n = (Triangle)curr.GetNeighbor(i);
-                    if (n != null && n != prev) //Internal
-                    {
-                        next = n;
-                        break;
-                    }
-                }
-
-                var nextType = GetTriangleType(next);
-                if (nextType == TriangleType.Sleeve)
-                {
-					prev = curr;
-					curr = next;
-                }
-                else if (nextType == TriangleType.Junction)
-                {
-					hitJunction = true;
-					junction = next;
-					break;
+			int safety = 0;
+			while (safety++ < 1000)
+			{
+				// Find the single un-visited internal neighbor
+				Triangle next = null;
+				for (int i = 0; i < 3; i++)
+				{
+					Triangle n = (Triangle)curr.GetNeighbor(i);
+					if (n != null && n != prev)
+					{
+						next = n;
+						break;
+					}
 				}
-                else break; // Terminal or null, end of branch
+
+				if (next == null) break;
+
+				// Get shared edge to make semi-circle test.
+				if (!GetSharedEdge(curr, next, out Vector2 v1, out Vector2 v2)) break;
+
+				Vector2 midpoint = (v1 + v2) * 0.5f;
+				float radius = Vector2.Distance(v1, v2) * 0.5f;
+
+				// Check every vertex gainst the semicircle.
+				bool allInside = true;
+				foreach (var v in regionVerts)
+				{
+					if (Vector2.Distance(v, midpoint) > radius + 0.001f)
+					{
+						allInside = false;
+						break;
+					}
+				}
+
+				if (!allInside) break; //End Pruning
+
+				TriangleType nextType = GetTriangleType(next);
+				if (nextType == TriangleType.Junction) break; // End Pruning if we hit a junction
+
+				prev = curr;
+				curr = next;
+				region.Add(curr);
+				for (int i = 0; i < 3; i++)
+					regionVerts.Add(GetVertexPos(curr, i));
 			}
 
-            // Pruning check: If the branch fits inside the semi-circle of the base chord
-            if (hitJunction && junction != null)
-            {
-                // The base chord is the edge shared between the last branch triangle (curr) and the junction
-                if (GetSharedEdge(curr, junction, out Vector2 v1, out Vector2 v2))
-                {
-                    Vector2 midpoint = (v1 + v2) * 0.5f;
-                    float diameter = Vector2.Distance(v1, v2);
-                    float radius = diameter * 0.5f;
+			if (safety >= 1000)
+			{
+				Debug.LogWarning("Safety break in pruning loop. Possible infinite loop or very large branch.");
+			}
 
-                    bool prune = true;
-                    foreach (var tri in branch)
-                    {
-                        for (int i = 0; i < 3; i++)
-                        {
-                            Vector2 v = GetVertexPos(tri, i);
-                            
-							// Semi-Circle
-                            if (Vector2.Distance(v, midpoint) > radius + 0.001f)
-                            {
-                                prune = false;
-                                break;
-                            }
-                        }
-                        if (!prune) break;
-                    }
-
-                    if (prune)
-                    {
-                        foreach (var tri in branch) prunedIds.Add(tri.ID);
-                    }
-                }
-            }
-        }
-
-        return ExtractAxis(mesh, prunedIds);
-    }
-
-	public static TriangleNet.Mesh RetriangulateMeshAroundSpine(TriangleNet.Mesh mesh, List<SpineSegment> prunedSpine, List<Vector2> boundary)
-	{
-		Polygon newPoly = new Polygon();
-
-		List<Vertex> boundaryVertices = new List<Vertex>();
-		foreach (Vector2 p in boundary)
-		{
-			Vertex v = new Vertex(p.x, p.y, 0); // 0 = boundary marker
-			newPoly.Add(v);
-			boundaryVertices.Add(v);
+			foreach (var tri in region)
+				prunedIds.Add(tri.ID);
 		}
-		newPoly.Add(new Contour(boundaryVertices));
 
-		// Collect all unique spine points from the pruned spine
+		return ExtractAxis(mesh, prunedIds);
+	}
+
+	public static TriangleNet.Mesh RetriangulateMeshAroundSpine(TriangleNet.Mesh mesh, List<SpineSegment> prunedSpine, List<Vector2> boundaryPoints)
+	{
+		var meshOptions = new TriangleNet.Meshing.ConstraintOptions()
+		{
+			ConformingDelaunay = false,
+			Convex = false,
+			SegmentSplitting = 0, //No automatic splitting of segments
+		};
+
+		// Unique List of spine points
 		HashSet<Vector2> spinePointsSet = new HashSet<Vector2>(new Vector2EqualityComparer());
 		foreach (var segment in prunedSpine)
 		{
 			spinePointsSet.Add(segment.Start);
 			spinePointsSet.Add(segment.End);
 		}
+		List<Vector2> spinePoints = spinePointsSet.ToList();
 
-		// Add spine points as Steiner points
-		List<Vertex> spineVertices = new List<Vertex>();
-		foreach (var point in spinePointsSet)
+		var allFixingPairs = new List<(Vector2 spine, Vector2 boundary)>();
+
+		var currentPoly = BuildPolygon(boundaryPoints, spinePoints, prunedSpine, allFixingPairs);
+		var currentMesh = (TriangleNet.Mesh)currentPoly.Triangulate(meshOptions, null);
+
+		const int maxIterations = 30; // Safety
+		for (int iter = 0; iter < maxIterations; iter++)
 		{
-			Vertex v = new Vertex(point.x, point.y, 1); // 1 = spine marker
-			newPoly.Add(v);
-			spineVertices.Add(v);
+			// Pass allFixingPairs so we don't propose the same diagonal twice
+			var newPair = FindOneFixingDiagonal(currentMesh, spinePoints, boundaryPoints, prunedSpine, allFixingPairs);
+
+			if (newPair == null)
+			{
+				Debug.Log($"Mesh clean after {iter} fixing iteration(s).");
+				break;
+			}
+
+			allFixingPairs.Add(newPair.Value);
+			Debug.Log($"Iteration {iter + 1}: adding diagonal {newPair.Value.spine} → {newPair.Value.boundary}");
+
+			var newPoly = BuildPolygon(boundaryPoints, spinePoints, prunedSpine, allFixingPairs);
+			currentMesh = (TriangleNet.Mesh)newPoly.Triangulate(meshOptions, null);
 		}
 
-		// Add spine segments as internal constraints
+		return currentMesh;
+	}
+
+	private static (Vector2 spine, Vector2 boundary)? FindOneFixingDiagonal(TriangleNet.Mesh mesh, List<Vector2> spinePoints, List<Vector2> boundaryPoints, List<SpineSegment> prunedSpine, List<(Vector2 spine, Vector2 boundary)> existingPairs)
+	{
+		foreach (var tri in mesh.Triangles)
+		{
+			Vertex v0 = tri.GetVertex(0);
+			Vertex v1 = tri.GetVertex(1);
+			Vertex v2 = tri.GetVertex(2);
+
+			int l0 = ClassifyVertex(v0, spinePoints, boundaryPoints);
+			int l1 = ClassifyVertex(v1, spinePoints, boundaryPoints);
+			int l2 = ClassifyVertex(v2, spinePoints, boundaryPoints);
+
+			bool isAllSpine = l0 == 1 && l1 == 1 && l2 == 1;
+			bool isAllBoundary = l0 == 0 && l1 == 0 && l2 == 0;
+
+			if (!isAllSpine && !isAllBoundary)
+				continue;
+
+			for (int i = 0; i < 3; i++)
+			{
+				ITriangle neighbor = tri.GetNeighbor(i);
+				if (neighbor == null || neighbor.ID < 0)
+					continue;
+
+				Vertex n0 = neighbor.GetVertex(0);
+				Vertex n1 = neighbor.GetVertex(1);
+				Vertex n2 = neighbor.GetVertex(2);
+
+				int nl0 = ClassifyVertex(n0, spinePoints, boundaryPoints);
+				int nl1 = ClassifyVertex(n1, spinePoints, boundaryPoints);
+				int nl2 = ClassifyVertex(n2, spinePoints, boundaryPoints);
+
+				if ((nl0 == 1 && nl1 == 1 && nl2 == 1) ||
+					(nl0 == 0 && nl1 == 0 && nl2 == 0))
+					continue;
+
+				Vertex apexInBad = tri.GetVertex(i);
+				Vertex sharedA = tri.GetVertex((i + 1) % 3);
+				Vertex sharedB = tri.GetVertex((i + 2) % 3);
+				Vertex apexInNeighbor = FindUnsharedVertex(new[] { n0, n1, n2 }, sharedA, sharedB);
+
+				if (apexInNeighbor == null)
+					continue;
+
+				int badApexLabel = ClassifyVertex(apexInBad, spinePoints, boundaryPoints);
+				int neighborApexLabel = ClassifyVertex(apexInNeighbor, spinePoints, boundaryPoints);
+
+				if (badApexLabel == neighborApexLabel)
+					continue;
+
+				Vector2 spinePos = ToVector2(badApexLabel == 1 ? apexInBad : apexInNeighbor);
+				Vector2 boundaryPos = ToVector2(badApexLabel == 1 ? apexInNeighbor : apexInBad);
+
+				bool alreadyTried = existingPairs.Exists(p =>
+					Vector2.Distance(p.spine, spinePos) < 0.001f &&
+					Vector2.Distance(p.boundary, boundaryPos) < 0.001f);
+
+				if (alreadyTried) continue; // Move to the next neighbor instead of getting stuck
+
+				// Reject this diagonal if it crosses any existing spine segment
+				if (DiagonalCrossesConstraint(spinePos, boundaryPos, prunedSpine))
+				{
+					Debug.LogWarning($"Diagonal {spinePos}→{boundaryPos} crosses a spine constraint — trying next neighbor.");
+					continue;
+				}
+
+				return (spinePos, boundaryPos);
+			}
+		}
+
+		return null;
+	}
+
+
+	private static bool DiagonalCrossesConstraint(Vector2 a, Vector2 b, List<SpineSegment> prunedSpine)
+	{
+		foreach (var spine in prunedSpine)
+		{
+			// Skip if they share an endpoint — that's not a crossing
+			if (Vector2.Distance(a, spine.Start) < 0.001f || Vector2.Distance(a, spine.End) < 0.001f ||
+				Vector2.Distance(b, spine.Start) < 0.001f || Vector2.Distance(b, spine.End) < 0.001f)
+				continue;
+
+			if (SegmentsIntersect(a, b, spine.Start, spine.End))
+				return true;
+		}
+
+		return false;
+	}
+	
+	private static Polygon BuildPolygon(List<Vector2> boundaryPoints, List<Vector2> spinePoints, List<SpineSegment> prunedSpine, List<(Vector2 spine, Vector2 boundary)> fixingPairs)
+	{
+		var poly = new Polygon();
+
+		// Add Boundary Vertices and Contours
+		List<Vertex> boundaryVertices = new List<Vertex>();
+		foreach (var p in boundaryPoints)
+			boundaryVertices.Add(new Vertex(p.x, p.y) { Label = 0 });  // Boundary
+		poly.Add(new Contour(boundaryVertices));
+
+		// Add Spine Vertices
+		List<Vertex> spineVertices = new List<Vertex>();
+		foreach (var p in spinePoints)
+		{
+			var v = new Vertex(p.x, p.y) { Label = 1 }; // Spine
+			spineVertices.Add(v);
+			poly.Add(v);
+		}
+
+		// Add Spine segments
 		foreach (var segment in prunedSpine)
 		{
-			// Find the vertices corresponding to this segment
 			Vertex start = null, end = null;
-
 			foreach (var v in spineVertices)
 			{
 				Vector2 vPos = new Vector2((float)v.X, (float)v.Y);
 				if (Vector2.Distance(vPos, segment.Start) < 0.001f) start = v;
 				if (Vector2.Distance(vPos, segment.End) < 0.001f) end = v;
 			}
+			if (start != null && end != null) poly.Add(new Segment(start, end) { Label = 1 }); 
+		}
 
-			// Add as a constraint edge if both vertices found
-			if (start != null && end != null)
+		// Fixing diagonals
+		if (fixingPairs != null)
+		{
+			foreach (var (spinePos, boundaryPos) in fixingPairs)
 			{
+				Vertex sv = spineVertices.Find(v => Vector2.Distance(new Vector2((float)v.X, (float)v.Y), spinePos) < 0.001f);
+				Vertex bv = boundaryVertices.Find(v => Vector2.Distance(new Vector2((float)v.X, (float)v.Y), boundaryPos) < 0.001f);
 
-				var seg = new Segment(start, end, 1); // 1 = spine edge marker
-				newPoly.Add(seg);
+				if (sv != null && bv != null) poly.Add(new Segment(sv, bv) { Label = 1 });
+				else Debug.LogWarning($"Could not resolve fixing diagonal: spine={spinePos} boundary={boundaryPos}");
 			}
 		}
 
-		// Perform constrained Delaunay triangulation with the spine constraints
-		var meshOptions = new TriangleNet.Meshing.ConstraintOptions()
-		{
-			ConformingDelaunay = false,
-			Convex = false
-		};
-
-		var retriangulatedMesh = (TriangleNet.Mesh)newPoly.Triangulate(meshOptions, null);
-		return retriangulatedMesh;
-	}
-	#endregion
-
-	#region Smoothing
-	/*
-	 * Different attempts at smoothing freeform meshes.
-	 * 1. Smoothing only along a given direction (z-direction) (This worked the best)
-	 * 2. Smoothing with pinned vertices
-	 * 3. Taubin smoothing (Laplacian + inverse Laplacian)
-	 */
-
-	private static void AddNeighbor(List<int>[] adj, int u, int v)
-	{
-		// Only add it if its not already there
-		if (!adj[u].Contains(v))
-			adj[u].Add(v);
-	}
-
-	public static Vector3[] SmoothAlongDirection(Vector3[] vertices, int[] triangles, Vector3 dir, float[] weights01,     // 0 = fixed, 1 = fully smooth
-														 int iterations, float alpha)
-	{
-		dir = dir.normalized;
-		int n = vertices.Length;
-
-		// Build neighbor list for every vertex
-		List<int>[] neighbors = new List<int>[n];
-		for (int i = 0; i < n; i++) neighbors[i] = new List<int>(8);
-
-		for (int t = 0; t < triangles.Length; t += 3)
-		{
-			int a = triangles[t];
-			int b = triangles[t + 1];
-			int c = triangles[t + 2];
-
-			AddNeighbor(neighbors, a, b);
-			AddNeighbor(neighbors, a, c);
-			AddNeighbor(neighbors, b, a);
-			AddNeighbor(neighbors, b, c);
-			AddNeighbor(neighbors, c, a);
-			AddNeighbor(neighbors, c, b);
-		}
-
-		// Look for base + height
-		Vector3[] basePos = new Vector3[n];
-		float[] h = new float[n]; // distance along 'dir'
-		for (int i = 0; i < n; i++)
-		{
-			float hi = Vector3.Dot(vertices[i], dir);
-			h[i] = hi;
-			basePos[i] = vertices[i] - dir * hi;
-		}
-
-		// Iterative smoothing
-		float[] hNext = new float[n];
-		for (int it = 0; it < iterations; it++)
-		{
-			// Weighted Laplacian step along dir only
-			for (int i = 0; i < n; i++)
-			{
-				// 0 = skip smoothing, 1 = full smoothing
-				float w = (weights01 != null && i < weights01.Length) ? Mathf.Clamp01(weights01[i]) : 1f;
-				if (w <= 1e-6f || neighbors[i].Count == 0) 
-				{ 
-					hNext[i] = h[i];
-					continue; 
-				}
-
-				// Find the average height of neighbors
-				float avg = 0f;
-				for (int k = 0; k < neighbors[i].Count; k++) 
-					avg += h[neighbors[i][k]];
-
-				avg /= neighbors[i].Count;
-
-				hNext[i] = Mathf.Lerp(h[i], avg, alpha * w);
-			}
-
-			// Make the newly calculated heights the current heights
-			float[] tmp = h;
-			h = hNext;
-			hNext = tmp;
-		}
-
-		// Add Vertices again
-		for (int i = 0; i < n; i++)
-			vertices[i] = basePos[i] + dir * h[i];
-
-		return vertices;
+		return poly;
 	}
 	#endregion
 }

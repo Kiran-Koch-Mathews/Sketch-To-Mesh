@@ -82,6 +82,10 @@ public class SketchToMesh : MonoBehaviour
 	public List<Vector2> LastCalculatedOutline { get; private set; }
 	public void SetOutline(List<Vector2> newOutline) { LastCalculatedOutline = newOutline; }
 
+	private List<StrokePoint> debugStrokePoints;
+	private bool showStrokePoints = true;
+	public void SetStrokePoints(List<StrokePoint> strokePoints) { debugStrokePoints = strokePoints; }
+
 	private void Awake()
 	{
 		mainCamera = Camera.main;
@@ -102,7 +106,7 @@ public class SketchToMesh : MonoBehaviour
 		List<Vector2Int> corners = FindCorners(sketchTex, absCorners, outlinePixels);
 		List<Vector2Int> orderedPath = FreeformMesh.TraceOutline(outlinePixels);
 
-		if (!forcedShape && shapeToBuild != ShapeType.Freeform) 
+		if (!forcedShape && shapeToBuild != ShapeType.Freeform)
 			shapeToBuild = PredictShape(sketchTex, absCorners, orderedPath);
 
 		Vector2Int centerPx = new Vector2Int(
@@ -175,7 +179,7 @@ public class SketchToMesh : MonoBehaviour
 			{
 				if (pixels[y * w + x].a > 0)
 				{
-					outlinePixels.Add(new Vector2Int(x,y));
+					outlinePixels.Add(new Vector2Int(x, y));
 					foundAny = true;
 					if (x < minPixel.x) minPixel.x = x;
 					if (y < minPixel.y) minPixel.y = y;
@@ -203,7 +207,7 @@ public class SketchToMesh : MonoBehaviour
 	{
 		List<Vector2Int> corners = new List<Vector2Int>();
 		Vector2Int minPixel = absCorners[0];
-		Vector2Int maxPixel = absCorners[absCorners.Count-1];
+		Vector2Int maxPixel = absCorners[absCorners.Count - 1];
 		int w = tex.width; int h = tex.height;
 
 		Vector2 center = new Vector2(
@@ -431,6 +435,7 @@ public class SketchToMesh : MonoBehaviour
 	#endregion
 
 	#region Shape Builders
+	public bool pruneBranches = true;
 	private Mesh BuildFreeformMesh(List<Vector2> outline)
 	{
 		LastCalculatedOutline = new List<Vector2>(outline);
@@ -454,13 +459,17 @@ public class SketchToMesh : MonoBehaviour
 		List<SpineSegment> rawSpine = FreeformMesh.ExtractAxis(tMesh);
 		Debug.Log($"Chordal axis has {rawSpine.Count} segments");
 
-		// Prune insignificant branches from the spine
-		List<SpineSegment> prunedSpine = FreeformMesh.PruneBranches(tMesh);
-		Debug.Log($"Pruned spine has {prunedSpine.Count} segments (removed {rawSpine.Count - prunedSpine.Count})");
+		List<SpineSegment> prunedSpine = rawSpine;
+		if (pruneBranches)
+		{
+			// Prune insignificant branches from the spine
+			prunedSpine = FreeformMesh.PruneBranches(tMesh);
+			Debug.Log($"Pruned spine has {prunedSpine.Count} segments (removed {rawSpine.Count - prunedSpine.Count})");
 
-		// Fan triangulation and retriangulation
-		tMesh = FreeformMesh.RetriangulateMeshAroundSpine(tMesh, prunedSpine, outline);
-		Debug.Log($"Retriangulated mesh has {tMesh.Vertices.Count} vertices and {tMesh.Triangles.Count} triangles");
+			// Fan triangulation and retriangulation
+			tMesh = FreeformMesh.RetriangulateMeshAroundSpine(tMesh, prunedSpine, outline);
+			Debug.Log($"Retriangulated mesh has {tMesh.Vertices.Count} vertices and {tMesh.Triangles.Count} triangles");
+		}
 
 		debugMesh = tMesh;
 		debugSpine = prunedSpine;
@@ -804,6 +813,19 @@ public class SketchToMesh : MonoBehaviour
 	#region Debug
 	private void OnDrawGizmos()
 	{
+		if (showStrokePoints)
+		{
+			if (debugStrokePoints != null)
+			{
+				foreach (var sp in debugStrokePoints)
+				{
+					Vector3 wp = P2W(sp.position);
+					Gizmos.color = Color.blue;
+					Gizmos.DrawSphere(wp, 0.04f);
+				}
+			}
+		}
+
 		if (debugMesh == null) return;
 
 		if (showOutline)
@@ -811,7 +833,7 @@ public class SketchToMesh : MonoBehaviour
 			foreach (var p in LastCalculatedOutline)
 			{
 				Vector3 wp = P2W(p);
-				Gizmos.color = Color.red;
+				Gizmos.color = Color.black;
 				Gizmos.DrawSphere(wp, 0.04f);
 			}
 		}
@@ -824,7 +846,6 @@ public class SketchToMesh : MonoBehaviour
 				Vector3 v0 = P2W(new Vector2((float)tri.GetVertex(0).X, (float)tri.GetVertex(0).Y));
 				Vector3 v1 = P2W(new Vector2((float)tri.GetVertex(1).X, (float)tri.GetVertex(1).Y));
 				Vector3 v2 = P2W(new Vector2((float)tri.GetVertex(2).X, (float)tri.GetVertex(2).Y));
-
 #if UNITY_EDITOR
 				Handles.color = Gizmos.color;
 				Handles.DrawAAPolyLine(6f, v0, v1);
@@ -835,7 +856,6 @@ public class SketchToMesh : MonoBehaviour
 				Gizmos.DrawLine(v1, v2);
 				Gizmos.DrawLine(v2, v0);
 #endif
-
 			}
 		}
 

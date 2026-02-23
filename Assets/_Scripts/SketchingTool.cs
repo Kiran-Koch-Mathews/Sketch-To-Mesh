@@ -5,11 +5,28 @@ using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.UI;
 
+[System.Serializable]
+public struct StrokePoint
+{
+    public Vector2 position;
+    public float timestamp;
+
+    public StrokePoint(Vector2 position, float timestamp)
+    {
+        this.position = position;
+        this.timestamp = timestamp;
+    }
+}
 
 [System.Serializable]
-public class SketchData
+public class Stroke
 {
-	public List<Vector2> points = new List<Vector2>();
+    public List<StrokePoint> points = new List<StrokePoint>();
+
+    public void AddPoint(Vector2 position)
+    {
+        points.Add(new StrokePoint(position, Time.time));
+    }
 }
 
 public enum DeletionFrame
@@ -47,6 +64,8 @@ public class SketchingTool : MonoBehaviour
 	private Vector2? firstDrawnPos = null;
 	private Vector2? previousDrawPos = null;
 	private Vector2? straightenStartPos = null;
+
+	private List<StrokePoint> currentStrokePoints = new List<StrokePoint>();
 	#endregion
 
 	#region Camera Controls
@@ -202,6 +221,8 @@ public class SketchingTool : MonoBehaviour
 	}
 	#endregion
 
+	private bool showPoints = false;
+
 	private bool KeepDrawing = false;
 	public void Setactivedraw(bool draw) { KeepDrawing = draw; }
 	private void Update()
@@ -313,7 +334,9 @@ public class SketchingTool : MonoBehaviour
 				}
 
 				isDrawing = false;
-
+				showPoints = true;
+				print(currentStrokePoints.Count);
+				sketchToMesh.SetStrokePoints(currentStrokePoints);
 				sketchToMesh.GenerateMeshFromSketch();
 				//ClearCanvas();
 			}
@@ -325,6 +348,7 @@ public class SketchingTool : MonoBehaviour
 		if (isDrawing && (isLeftMouseHeld || isStraightening))
 		{
 			Vector2 currentDrawPos = GetCurrentTexturePosition();
+			currentStrokePoints.Add(new StrokePoint(currentDrawPos, Time.time));
 
 			if (isStraightening)
 			{
@@ -359,6 +383,8 @@ public class SketchingTool : MonoBehaviour
 		straightenStartPos = null;
 		previousDrawPos = null;
 		firstDrawnPos = null;
+
+		currentStrokePoints.Clear();
 
 		ClearTexture(previewTexture);
 		previewTexture.Apply();
@@ -503,5 +529,18 @@ public class SketchingTool : MonoBehaviour
 
 		rawImage.texture = combined;
 	}
+
+	private void OnDrawGizmos()
+	{
+		if (showPoints)
+		{
+			foreach (StrokePoint sp in currentStrokePoints)
+			{
+				Gizmos.color = Color.red;
+				Gizmos.DrawSphere(new Vector3(sp.position.x, sp.position.y, 0), 5f);
+			}
+		}
+	}
+
 	#endregion
 }
