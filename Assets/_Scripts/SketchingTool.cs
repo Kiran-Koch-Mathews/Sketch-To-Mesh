@@ -157,10 +157,9 @@ public class SketchingTool : MonoBehaviour
 			DrawLoadedOutline(loadedPoints);
 
 			//TODO: ADD OPTION TO GENERATE MESH FROM LOADED SKETCH
+			Debug.Log($"Loaded {loadedPoints.Count} points.");
 			sketchToMesh.SetOutline(loadedPoints);
 			sketchToMesh.GenerateLoadedMesh(loadedPoints);
-
-			Debug.Log($"Loaded and redrew {loadedPoints.Count} points.");
 		}
 	}
 
@@ -335,7 +334,6 @@ public class SketchingTool : MonoBehaviour
 
 				isDrawing = false;
 				showPoints = true;
-				print(currentStrokePoints.Count);
 				sketchToMesh.SetStrokePoints(currentStrokePoints);
 				sketchToMesh.GenerateMeshFromSketch();
 				//ClearCanvas();

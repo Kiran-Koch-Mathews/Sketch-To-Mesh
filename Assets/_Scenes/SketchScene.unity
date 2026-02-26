@@ -670,6 +670,7 @@ MonoBehaviour:
   shapeToBuild: 5
   meshDistance: 5
   shapeDepth: 1
+  freeformSubdivisions: 2
   visibilityOffset: 0.2
   raycastMask:
     serializedVersion: 2

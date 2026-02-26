@@ -61,6 +61,7 @@ public class SketchToMesh : MonoBehaviour
 	[SerializeField] private float meshDistance = 5f;
 	[Range(0f, 1f)]
 	[SerializeField] private float shapeDepth = 1f;
+	[SerializeField] private int freeformSubdivisions = 2;
 	[SerializeField] float visibilityOffset = 0.25f;
 	[SerializeField] private LayerMask raycastMask = ~0;
 	[SerializeField] bool avoidObstruction = true;
@@ -436,6 +437,7 @@ public class SketchToMesh : MonoBehaviour
 
 	#region Shape Builders
 	public bool pruneBranches = true;
+	public bool subdivide = true;
 	private Mesh BuildFreeformMesh(List<Vector2> outline)
 	{
 		LastCalculatedOutline = new List<Vector2>(outline);
@@ -453,6 +455,7 @@ public class SketchToMesh : MonoBehaviour
 
 		var meshOptions = new ConstraintOptions() { ConformingDelaunay = false, Convex = false };
 		var tMesh = (TriangleNet.Mesh)poly.Triangulate(meshOptions, null);
+		debugMesh = tMesh;
 		Debug.Log($"CDT created {tMesh.Vertices.Count} vertices and {tMesh.Triangles.Count} triangles");
 
 		// Extract the raw chordal axis (spine)
@@ -462,16 +465,27 @@ public class SketchToMesh : MonoBehaviour
 		List<SpineSegment> prunedSpine = rawSpine;
 		if (pruneBranches)
 		{
-			// Prune insignificant branches from the spine
 			prunedSpine = FreeformMesh.PruneBranches(tMesh);
 			Debug.Log($"Pruned spine has {prunedSpine.Count} segments (removed {rawSpine.Count - prunedSpine.Count})");
 
-			// Fan triangulation and retriangulation
-			tMesh = FreeformMesh.RetriangulateMeshAroundSpine(tMesh, prunedSpine, outline);
-			Debug.Log($"Retriangulated mesh has {tMesh.Vertices.Count} vertices and {tMesh.Triangles.Count} triangles");
+			tMesh = FreeformMesh.Retriangulate(tMesh, prunedSpine, outline);
+			Debug.Log($"Fanned mesh has {tMesh.Vertices.Count} vertices and {tMesh.Triangles.Count} triangles");
+			debugMesh = tMesh;
+
+			if (subdivide)
+			{
+				// Collect unique spine points for vertex classification.
+				var spinePointsSet = new HashSet<Vector2>(new Vector2EqualityComparer());
+				foreach (var s in prunedSpine) { spinePointsSet.Add(s.Start); spinePointsSet.Add(s.End); }
+				List<Vector2> spinePoints = spinePointsSet.ToList();
+
+				// Subdivide in 2D and store as debugMesh to verify before lifting to 3D.
+				tMesh = FreeformMesh.Subdivide(tMesh, spinePoints, outline, freeformSubdivisions);
+				debugMesh = tMesh;
+				Debug.Log($"Subdivided mesh has {tMesh.Vertices.Count} vertices and {tMesh.Triangles.Count} triangles");
+			}
 		}
 
-		debugMesh = tMesh;
 		debugSpine = prunedSpine;
 
 		return null;
@@ -857,6 +871,10 @@ public class SketchToMesh : MonoBehaviour
 				Gizmos.DrawLine(v2, v0);
 #endif
 			}
+
+			Gizmos.color = Color.cyan;
+			foreach (var v in debugMesh.Vertices)
+				Gizmos.DrawSphere(P2W(new Vector2((float)v.X, (float)v.Y)), 0.02f);
 		}
 
 		if (showChordalAxis && debugSpine != null)
