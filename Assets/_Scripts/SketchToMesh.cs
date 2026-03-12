@@ -84,7 +84,7 @@ public class SketchToMesh : MonoBehaviour
 	public void SetOutline(List<Vector2> newOutline) { LastCalculatedOutline = newOutline; }
 
 	private List<StrokePoint> debugStrokePoints;
-	private bool showStrokePoints = true;
+	private bool showStrokePoints = false;
 	public void SetStrokePoints(List<StrokePoint> strokePoints) { debugStrokePoints = strokePoints; }
 
 	private void Awake()
@@ -872,7 +872,7 @@ public class SketchToMesh : MonoBehaviour
 #endif
 			}
 
-			Gizmos.color = Color.cyan;
+			Gizmos.color = Color.black;
 			foreach (var v in debugMesh.Vertices)
 				Gizmos.DrawSphere(P2W(new Vector2((float)v.X, (float)v.Y)), 0.02f);
 		}

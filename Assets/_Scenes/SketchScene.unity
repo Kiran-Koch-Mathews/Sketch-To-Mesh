@@ -682,6 +682,7 @@ MonoBehaviour:
   showChordalAxis: 1
   showOutline: 0
   pruneBranches: 1
+  subdivide: 1
 --- !u!1 &465483698
 GameObject:
   m_ObjectHideFlags: 0

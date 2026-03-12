@@ -6,6 +6,7 @@ using TriangleNet.Topology;
 using UnityEngine;
 
 public enum TriangleType { Terminal, Sleeve, Junction }
+
 public struct SpineSegment
 {
 	public Vector2 Start;
@@ -558,6 +559,11 @@ public static class FreeformMesh
 			SegmentSplitting = 0 // Only use Spine
 		};
 
+		var qualityOptions = new TriangleNet.Meshing.QualityOptions()
+		{
+			MinimumAngle = 5
+		};
+
 		// Unique List of spine points
 		HashSet<Vector2> spinePointsSet = new HashSet<Vector2>(new Vector2EqualityComparer());
 		foreach (var segment in prunedSpine)
@@ -569,8 +575,8 @@ public static class FreeformMesh
 		var spinePoints = spinePointsSet.ToList();
 		var allFixingPairs = new List<(Vector2 spine, Vector2 boundary)>();
 		var currentPoly = BuildPolygon(boundaryPoints, spinePoints, prunedSpine, allFixingPairs);
-		var currentMesh = (TriangleNet.Mesh)currentPoly.Triangulate(meshOptions, null);
-		
+		var currentMesh = (TriangleNet.Mesh)currentPoly.Triangulate(meshOptions, qualityOptions);
+
 		//First, collect all non-degenerate Delauney Triangles
 		var seedPairs = CollectNonDegenerateEdges(currentMesh, spinePoints, boundaryPoints);
 		foreach (var pair in seedPairs)
@@ -624,7 +630,7 @@ public static class FreeformMesh
 			SegmentSplitting = 0 // Only use Spine
 		};
 
-		var vcComparer = new Vector2EqualityComparer(1e-5f);
+		var vcComparer = new Vector2EqualityComparer();
 		var vc = new Dictionary<Vector2, int>(vcComparer);
 		var verts = new List<Vector2>();
 		var edgeSet = new HashSet<(int, int)>();
@@ -632,14 +638,28 @@ public static class FreeformMesh
 		#region Inline Helpers
 		void AddEdge(Vector2 a, Vector2 b)
 		{
-			if (!vc.TryGetValue(a, out int ia)) { ia = verts.Count; verts.Add(a); vc[a] = ia; }
-			if (!vc.TryGetValue(b, out int ib)) { ib = verts.Count; verts.Add(b); vc[b] = ib; }
+			if (!vc.TryGetValue(a, out int ia)) 
+			{ 
+				ia = verts.Count;
+				verts.Add(a); 
+				vc[a] = ia; 
+			}
+
+			if (!vc.TryGetValue(b, out int ib)) 
+			{ 
+				ib = verts.Count; 
+				verts.Add(b); 
+				vc[b] = ib;
+			}
+
+			//Prevent duplicates
 			edgeSet.Add(ia < ib ? (ia, ib) : (ib, ia));
 		}
 
 		// Recursively subdivides a triangle by splitting it into an apex triangle and a base quad.
 		void CollectTriangle(Vector2 ap, Vector2 ba, Vector2 bb, int depth)
 		{
+			// Base case: just emit triangle edges.
 			if (depth == 0)
 			{
 				AddEdge(ap, ba);
@@ -648,9 +668,12 @@ public static class FreeformMesh
 				return;
 			}
 
+			// Midpoints along apex edges and create midpoint edge
 			Vector2 m1 = (ap + ba) * 0.5f;
 			Vector2 m2 = (ap + bb) * 0.5f;
 			AddEdge(m1, m2);
+
+			//Recurse: Upper triangle and lower quad
 			CollectTriangle(ap, m1, m2, depth - 1);
 			CollectQuad(m1, m2, ba, bb, depth - 1);
 		}
@@ -660,19 +683,28 @@ public static class FreeformMesh
 		{
 			if (depth == 0)
 			{
-				AddEdge(topA, topB); AddEdge(topB, botB);
-				AddEdge(botB, botA); AddEdge(botA, topA);
-				AddEdge(topA, botB); // diagonal splits the quad into two triangles
+				AddEdge(topA, topB); 
+				AddEdge(topB, botB);
+				AddEdge(botB, botA); 
+				AddEdge(botA, topA);
+
+				// diagonal splits the quad into two triangles
+				AddEdge(topA, botB); 
 				return;
 			}
+
+			//Midpoints and add edge
 			Vector2 midA = (topA + botA) * 0.5f;
 			Vector2 midB = (topB + botB) * 0.5f;
 			AddEdge(midA, midB);
+
+			// Subdivide into two smaller quads.
 			CollectQuad(topA, topB, midA, midB, depth - 1);
 			CollectQuad(midA, midB, botA, botB, depth - 1);
 		}
 		#endregion
 
+		// Walk original mesh triangles and subdivide each one.
 		foreach (var tri in mesh.Triangles)
 		{
 			var (sv0, sv1, sv2) = GetTriangleVertices(tri);
@@ -684,17 +716,28 @@ public static class FreeformMesh
 				ClassifyVertex(sv2, spinePoints, boundaryPoints)
 			};
 
-			if (IsDegenerate(lbl[0], lbl[1], lbl[2])) continue;
+			//Edge Case
+			if (IsDegenerate(lbl[0], lbl[1], lbl[2]))
+			{
+				Debug.LogWarning($"Degenerate triangle {tri.ID} during subdivision.");
+				continue;
+			}
 
 			int apexIdx = -1;
 			for (int i = 0; i < 3; i++)
-				if (lbl[i] != lbl[(i + 1) % 3] && lbl[i] != lbl[(i + 2) % 3]) { apexIdx = i; break; }
-
+			{
+				if (lbl[i] != lbl[(i + 1) % 3] && lbl[i] != lbl[(i + 2) % 3])
+				{
+					apexIdx = i;
+					break;
+				}
+			}
 			if (apexIdx < 0) { Debug.LogWarning($"Fan triangle {tri.ID}: could not identify apex, skipping."); continue; }
 
 			CollectTriangle(v2[apexIdx], v2[(apexIdx + 1) % 3], v2[(apexIdx + 2) % 3], subdivisions);
 		}
 
+		// Split edges wherever intermediate vertices lie on them
 		var splitEdges = new HashSet<(int, int)>();
 		foreach (var (ia, ib) in edgeSet)
 		{
@@ -726,11 +769,11 @@ public static class FreeformMesh
 			splitEdges.Add(prev < ib ? (prev, ib) : (ib, prev));
 		}
 
+		// Rebuild a Triangle.NET polygon with constraints.
 		var poly = new Polygon();
 		var boundaryTNVerts = boundaryPoints.Select(p => new Vertex(p.x, p.y) { Label = 0 }).ToList();
 		poly.Add(new Contour(boundaryTNVerts));
 
-		// Use the tight vcComparer so Triangle.NET vertices match your C# subdivision logic perfectly
 		var tnVertMap = new Dictionary<Vector2, Vertex>(vcComparer);
 		for (int i = 0; i < boundaryPoints.Count; i++)
 			tnVertMap[boundaryPoints[i]] = boundaryTNVerts[i];
@@ -743,7 +786,7 @@ public static class FreeformMesh
 			poly.Add(v);
 		}
 
-		// Update these as well to prevent aggressive collapsing at the boundary seam
+		// Add constrained segments
 		var boundaryIndexMap = new Dictionary<Vector2, int>(vcComparer);
 		for (int i = 0; i < boundaryPoints.Count; i++)
 			boundaryIndexMap.TryAdd(boundaryPoints[i], i);
