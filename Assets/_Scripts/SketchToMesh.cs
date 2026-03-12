@@ -95,8 +95,18 @@ public class SketchToMesh : MonoBehaviour
 
 	public void GenerateLoadedMesh(List<Vector2> points)
 	{
-		BuildFreeformMesh(points);
+		Vector3 centerPoint = Vector3.zero;
+		foreach (var p in points) centerPoint += P2W(p);
+		centerPoint /= points.Count;
+
+		Mesh shapeMesh = BuildFreeformMesh(points);
+		if (shapeMesh)
+		{
+			GameObject generatedMeshObject = GenerateMesh(centerPoint, shapeMesh);
+			AddCollider(generatedMeshObject, shapeMesh);
+		}
 	}
+
 	public void GenerateMeshFromSketch()
 	{
 		Texture2D sketchTex = sketchingTool.GetFinalTexture();
@@ -119,13 +129,6 @@ public class SketchToMesh : MonoBehaviour
 
 		float scaledDepth = shapeDepth * (currentDistance / meshDistance);
 		Vector3 centerPoint = FindCenterPoint(absCorners, currentDistance);
-
-		GameObject generatedMeshObject = new GameObject(shapeToBuild.ToString() + " Sketch");
-		generatedMeshObject.transform.SetParent(meshContainer, true);
-		generatedMeshObject.transform.position = FindCenterPoint(absCorners, currentDistance);
-		MeshFilter mf = generatedMeshObject.AddComponent<MeshFilter>();
-		MeshRenderer mr = generatedMeshObject.AddComponent<MeshRenderer>();
-		mr.material = meshMaterial;
 
 		Mesh shapeMesh = null;
 		switch (shapeToBuild)
@@ -153,12 +156,35 @@ public class SketchToMesh : MonoBehaviour
 			case ShapeType.Freeform:
 				List<Vector2> cleanedSilhouette = FreeformMesh.ResamplePath(orderedPath, resampling);
 				print("Resampling reduced to " + cleanedSilhouette.Count + " points from " + orderedPath.Count);
+
+				//Find new center point
+				Vector3 silhouetteCentroid = Vector3.zero;
+				foreach (var p in cleanedSilhouette) silhouetteCentroid += P2W(p);
+				silhouetteCentroid /= cleanedSilhouette.Count;
+				centerPoint = silhouetteCentroid;
+
 				shapeMesh = BuildFreeformMesh(cleanedSilhouette);
 				break;
 		}
 
-		mf.mesh = shapeMesh;
-		if (generatedMeshObject && shapeMesh) AddCollider(generatedMeshObject, shapeMesh);
+		if (shapeMesh)
+		{
+			GameObject generatedMeshObject = GenerateMesh(centerPoint, shapeMesh);
+			AddCollider(generatedMeshObject, shapeMesh);
+		}
+	}
+
+	private GameObject GenerateMesh(Vector3 centerPoint, Mesh mesh)
+	{
+		GameObject generatedMeshObject = new GameObject(shapeToBuild.ToString() + " Sketch");
+		generatedMeshObject.transform.SetParent(meshContainer, true);
+		generatedMeshObject.transform.position = centerPoint;
+		MeshFilter mf = generatedMeshObject.AddComponent<MeshFilter>();
+		MeshRenderer mr = generatedMeshObject.AddComponent<MeshRenderer>();
+		mr.material = meshMaterial;
+		mf.mesh = mesh;
+
+		return generatedMeshObject;
 	}
 
 	#region Texture2D Decoding
@@ -442,6 +468,12 @@ public class SketchToMesh : MonoBehaviour
 	{
 		LastCalculatedOutline = new List<Vector2>(outline);
 
+		// World-space centroid — used as the mesh's local origin so the
+		// GameObject pivot sits at the visual centre of the silhouette.
+		Vector3 center = Vector3.zero;
+		foreach (var p in outline) center += P2W(p);
+		center /= outline.Count;
+
 		// Triangle.NET creates a connected mesh of triangles from the 2D outline (CDT)
 		Polygon poly = new Polygon();
 		List<Vertex> vertices = new List<Vertex>();
@@ -463,6 +495,8 @@ public class SketchToMesh : MonoBehaviour
 		Debug.Log($"Chordal axis has {rawSpine.Count} segments");
 
 		List<SpineSegment> prunedSpine = rawSpine;
+		List<Vector2> spinePoints = new List<Vector2>();
+
 		if (pruneBranches)
 		{
 			prunedSpine = FreeformMesh.PruneBranches(tMesh);
@@ -472,23 +506,35 @@ public class SketchToMesh : MonoBehaviour
 			Debug.Log($"Fanned mesh has {tMesh.Vertices.Count} vertices and {tMesh.Triangles.Count} triangles");
 			debugMesh = tMesh;
 
-			if (subdivide)
-			{
-				// Collect unique spine points for vertex classification.
-				var spinePointsSet = new HashSet<Vector2>(new Vector2EqualityComparer());
-				foreach (var s in prunedSpine) { spinePointsSet.Add(s.Start); spinePointsSet.Add(s.End); }
-				List<Vector2> spinePoints = spinePointsSet.ToList();
+			var spinePointsSet = new HashSet<Vector2>(new Vector2EqualityComparer());
+			foreach (var s in prunedSpine) { spinePointsSet.Add(s.Start); spinePointsSet.Add(s.End); }
+			spinePoints = spinePointsSet.ToList();
+		}
 
-				// Subdivide in 2D and store as debugMesh to verify before lifting to 3D.
-				tMesh = FreeformMesh.Subdivide(tMesh, spinePoints, outline, freeformSubdivisions);
-				debugMesh = tMesh;
-				Debug.Log($"Subdivided mesh has {tMesh.Vertices.Count} vertices and {tMesh.Triangles.Count} triangles");
-			}
+		// Compute spine elevations NOW, before subdivision.
+		// After Subdivide, spine→boundary edges are replaced by spine→intermediate
+		// chains, so direct connectivity is lost and elevations would compute as zero.
+		var spineElevations = FreeformMesh.ComputeSpineElevations(tMesh, spinePoints, outline, P2W);
+
+		if (pruneBranches && subdivide)
+		{
+			tMesh = FreeformMesh.Subdivide(tMesh, spinePoints, outline, freeformSubdivisions);
+			debugMesh = tMesh;
+			Debug.Log($"Subdivided mesh has {tMesh.Vertices.Count} vertices and {tMesh.Triangles.Count} triangles");
 		}
 
 		debugSpine = prunedSpine;
 
-		return null;
+		// Elevate spine, taper intermediates with quarter-oval profile,
+		// mirror to back face — returns a closed watertight Unity Mesh.
+		return FreeformMesh.BuildInflatedMesh(
+			tMesh,
+			spinePoints,
+			outline,
+			spineElevations,
+			P2W,
+			mainCamera.transform.forward,
+			center);
 	}
 
 	#region Primitives

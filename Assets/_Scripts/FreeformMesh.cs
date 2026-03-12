@@ -441,7 +441,8 @@ public static class FreeformMesh
 
 		return false;
 	}
-	private static (Vector2 spine, Vector2 boundary)? FindOneFixingDiagonal(TriangleNet.Mesh mesh, List<Vector2> spinePoints, List<Vector2> boundaryPoints, List<SpineSegment> prunedSpine, List<(Vector2 spine, Vector2 boundary)> existingPairs)
+	private static (Vector2 spine, Vector2 boundary)? FindOneFixingDiagonal(TriangleNet.Mesh mesh, List<Vector2> spinePoints, List<Vector2> boundaryPoints, 
+																			List<SpineSegment> prunedSpine, List<(Vector2 spine, Vector2 boundary)> existingPairs)
 	{
 		foreach (var tri in mesh.Triangles)
 		{
@@ -496,13 +497,10 @@ public static class FreeformMesh
 					continue;
 
 				// Reject if this diagonal crosses any already-committed fixing diagonal.
-				// DiagonalCrossesConstraint only tests against prunedSpine, so we must
-				// check existingPairs separately — a candidate that crosses a previously
-				// added fixing edge is also an illegal edge.
+				// A candidate that crosses a previously added fixing edge is an illegal edge.
 				bool crossesExisting = false;
 				foreach (var (existingSpine, existingBoundary) in existingPairs)
 				{
-					// Skip if they share an endpoint (touching is fine, crossing is not)
 					if (Vector2.Distance(spinePos, existingSpine) < Eps ||
 						Vector2.Distance(spinePos, existingBoundary) < Eps ||
 						Vector2.Distance(boundaryPos, existingSpine) < Eps ||
@@ -521,7 +519,6 @@ public static class FreeformMesh
 						break;
 					}
 				}
-
 				if (crossesExisting) continue;
 
 				return (spinePos, boundaryPos);
@@ -588,11 +585,6 @@ public static class FreeformMesh
 			SegmentSplitting = 0 // Only use Spine
 		};
 
-		var qualityOptions = new TriangleNet.Meshing.QualityOptions()
-		{
-			MinimumAngle = 5
-		};
-
 		// Unique List of spine points
 		HashSet<Vector2> spinePointsSet = new HashSet<Vector2>(new Vector2EqualityComparer());
 		foreach (var segment in prunedSpine)
@@ -604,7 +596,7 @@ public static class FreeformMesh
 		var spinePoints = spinePointsSet.ToList();
 		var allFixingPairs = new List<(Vector2 spine, Vector2 boundary)>();
 		var currentPoly = BuildPolygon(boundaryPoints, spinePoints, prunedSpine, allFixingPairs);
-		var currentMesh = (TriangleNet.Mesh)currentPoly.Triangulate(meshOptions, qualityOptions);
+		var currentMesh = (TriangleNet.Mesh)currentPoly.Triangulate(meshOptions, null);
 
 		//First, collect all non-degenerate Delauney Triangles
 		var seedPairs = CollectNonDegenerateEdges(currentMesh, spinePoints, boundaryPoints);
@@ -621,7 +613,7 @@ public static class FreeformMesh
 		{
 			Debug.Log($"Seeded {seedPairs.Count} non-degenerate spine to boundary edge(s) as hard constraints.");
 			var seededPoly = BuildPolygon(boundaryPoints, spinePoints, prunedSpine, allFixingPairs);
-			currentMesh = (TriangleNet.Mesh)seededPoly.Triangulate(meshOptions, qualityOptions);
+			currentMesh = (TriangleNet.Mesh)seededPoly.Triangulate(meshOptions, null);
 		}
 		else Debug.LogWarning("Potential Seeded Triangulation Error");
 
@@ -639,13 +631,175 @@ public static class FreeformMesh
 			allFixingPairs.Add(newPair.Value);
 			Debug.Log($"Iteration {safety}: adding diagonal {newPair.Value.spine} to {newPair.Value.boundary}");
 			var newPoly = BuildPolygon(boundaryPoints, spinePoints, prunedSpine, allFixingPairs);
-			currentMesh = (TriangleNet.Mesh)newPoly.Triangulate(meshOptions, qualityOptions);
+			currentMesh = (TriangleNet.Mesh)newPoly.Triangulate(meshOptions, null);
 		}
 
 		if (safety >= 1000)
 			Debug.LogWarning("Safety break in retriangulation loop. Possible infinite loop or very stubborn degenerate cases.");
 
 		return currentMesh;
+	}
+	#endregion
+
+	#region Inflation
+	public static Dictionary<Vector2, float> ComputeSpineElevations(TriangleNet.Mesh retriangulatedMesh, List<Vector2> spinePoints, 
+																	List<Vector2> boundaryPoints, Func<Vector2, Vector3> p2w)
+	{
+		var vcCmp = new Vector2EqualityComparer();
+		var sumD = new Dictionary<Vector2, float>(vcCmp);
+		var cntD = new Dictionary<Vector2, int>(vcCmp);
+		foreach (var sp in spinePoints) { sumD[sp] = 0f; cntD[sp] = 0; }
+
+		// Find all triangles that have one spine vertex and one boundary vertex
+		foreach (var tri in retriangulatedMesh.Triangles)
+		{
+			for (int i = 0; i < 3; i++)
+			{
+				var vi = tri.GetVertex(i);
+				if (vi == null) continue;
+				Vector2 posI = ToVector2(vi);
+
+				// Elevation is based on distance from boundary vertices (on spine)
+				Vector2 spineKey = default;
+				bool isSpine = false;
+				foreach (var sp in spinePoints)
+				{
+					if (Vector2.Distance(sp, posI) < Eps) { spineKey = sp; isSpine = true; break; }
+				}
+				if (!isSpine) continue;
+
+				// Add distances to any boundary vertices in this triangle.
+				for (int j = 0; j < 3; j++)
+				{
+					if (j == i) continue;
+					var vj = tri.GetVertex(j);
+					if (vj == null) continue;
+					Vector2 posJ = ToVector2(vj);
+					if (!boundaryPoints.Any(b => Vector2.Distance(b, posJ) < Eps)) continue;
+
+					// Local radius of the inflated surface
+					sumD[spineKey] += Vector3.Distance(p2w(posI), p2w(posJ));
+					cntD[spineKey]++;
+				}
+			}
+		}
+
+		var result = new Dictionary<Vector2, float>(vcCmp);
+		//Compute final elevation as average distance to boundary for each spine vertex
+		foreach (var sp in spinePoints) 
+			result[sp] = cntD[sp] > 0 ? sumD[sp] / cntD[sp] : 0f;
+
+		return result;
+	}
+
+	public static Mesh BuildInflatedMesh(TriangleNet.Mesh mesh2D, List<Vector2> spinePoints, List<Vector2> boundaryPoints, Dictionary<Vector2, float> spineElevations,
+										 Func<Vector2, Vector3> p2w, Vector3 cameraForward, Vector3 center)
+	{
+		var vcCmp = new Vector2EqualityComparer();
+		Vector3 liftDir = -cameraForward.normalized;
+
+		// Index all vertices by sequential array position for fast triangle lookup
+		var allVerts = mesh2D.Vertices.ToList();
+		int N = allVerts.Count;
+		var idToIdx = new Dictionary<int, int>(N);
+		for (int i = 0; i < N; i++) idToIdx[allVerts[i].ID] = i;
+
+		// Per-vertex elevation
+		float[] elevations = new float[N];
+		for (int i = 0; i < N; i++)
+		{
+			Vector2 vPos = ToVector2(allVerts[i]);
+			int label = ClassifyVertex(allVerts[i], spinePoints, boundaryPoints);
+
+			// On the boundary, do not elevate
+			if (label == 0) elevations[i] = 0f;
+			// Pruned spine vertex, full elevation
+			else if (label == 1) 
+			{
+				spineElevations.TryGetValue(vPos, out float e);
+				elevations[i] = e;
+			}
+			// Subdivision vertex, elevate based on distance ratio
+			else
+			{
+				if (spinePoints.Count == 0) 
+				{ 
+					elevations[i] = 0f; 
+					continue;
+				}
+
+				float dBoundary = float.MaxValue;
+				foreach (var b in boundaryPoints)
+					dBoundary = Mathf.Min(dBoundary, Vector2.Distance(vPos, b));
+
+				float dSpine = float.MaxValue;
+				Vector2 nearestSpine = spinePoints[0];
+				foreach (var s in spinePoints)
+				{
+					float d = Vector2.Distance(vPos, s);
+					if (d < dSpine) { dSpine = d; nearestSpine = s; }
+				}
+
+				float total = dBoundary + dSpine;
+				if (total < Eps) { elevations[i] = 0f; continue; }
+
+				// Uses a quarter sine curve to smoothly interpolate elevation from boundary to spine, based on relative distance.
+				float t = dBoundary / total;
+				float baseElev = spineElevations.TryGetValue(nearestSpine, out float se) ? se : 0f;
+				elevations[i] = baseElev * Mathf.Sin(t * Mathf.PI * 0.5f);
+			}
+		}
+
+		//Build front/back vertex arrays
+		var verts3D = new Vector3[N * 2];
+		var uvs = new Vector2[N * 2];
+
+		float minX = float.MaxValue, maxX = float.MinValue;
+		float minY = float.MaxValue, maxY = float.MinValue;
+		foreach (var v in allVerts)
+		{
+			float vx = (float)v.X, vy = (float)v.Y;
+			if (vx < minX) minX = vx; if (vx > maxX) maxX = vx;
+			if (vy < minY) minY = vy; if (vy > maxY) maxY = vy;
+		}
+		float rangeX = Mathf.Max(maxX - minX, Eps);
+		float rangeY = Mathf.Max(maxY - minY, Eps);
+
+		// Front vertices are lifted by elevation, back vertices are lowered by elevation
+		for (int i = 0; i < N; i++)
+		{
+			Vector2 p2d = ToVector2(allVerts[i]);
+			Vector3 basePos = p2w(p2d) - center;
+			verts3D[i] = basePos + liftDir * elevations[i];
+			verts3D[N + i] = basePos - liftDir * elevations[i];
+			uvs[i] = uvs[N + i] = new Vector2((p2d.x - minX) / rangeX, (p2d.y - minY) / rangeY);
+		}
+
+		// Build triangle index list
+		var tris = new List<int>(mesh2D.Triangles.Count * 6);
+		foreach (var tri in mesh2D.Triangles)
+		{
+			var tv0 = tri.GetVertex(0);
+			var tv1 = tri.GetVertex(1);
+			var tv2 = tri.GetVertex(2);
+			if (tv0 == null || tv1 == null || tv2 == null) continue;
+			if (!idToIdx.TryGetValue(tv0.ID, out int i0) ||
+				!idToIdx.TryGetValue(tv1.ID, out int i1) ||
+				!idToIdx.TryGetValue(tv2.ID, out int i2)) continue;
+
+			tris.Add(i0); tris.Add(i2); tris.Add(i1);				// front (CW)
+			tris.Add(N + i0); tris.Add(N + i1); tris.Add(N + i2);   // back  (CCW)
+		}
+
+		// Build Unity Mesh
+		var unityMesh = new Mesh();
+		unityMesh.vertices = verts3D;
+		unityMesh.triangles = tris.ToArray();
+		unityMesh.uv = uvs;
+		unityMesh.RecalculateNormals();
+		unityMesh.RecalculateBounds();
+
+		return unityMesh;
 	}
 	#endregion
 
