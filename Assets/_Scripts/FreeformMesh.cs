@@ -145,7 +145,7 @@ public static class FreeformMesh
 
 		if (cleanPath.Count > 1 && Vector2.Distance(cleanPath[^1], cleanPath[0]) < interval * 0.1f)
 			cleanPath.RemoveAt(cleanPath.Count - 1);
-		
+
 		return cleanPath;
 	}
 	#endregion
@@ -194,7 +194,7 @@ public static class FreeformMesh
 		float t = Vector2.Dot(p - a, ab) / (len * len);
 
 		// strictly between endpoints
-		return t > Eps && t < 1f - Eps; 
+		return t > Eps && t < 1f - Eps;
 	}
 	#endregion
 
@@ -384,7 +384,7 @@ public static class FreeformMesh
 			int l1 = ClassifyVertex(v1, spinePoints, boundaryPoints);
 			int l2 = ClassifyVertex(v2, spinePoints, boundaryPoints);
 
-			// Skip degenerate triangles — these are exactly what we are trying to remove.
+			// Skip degenerate triangles � these are exactly what we are trying to remove.
 			if (IsDegenerate(l0, l1, l2)) continue;
 
 			Vertex[] verts = { v0, v1, v2 };
@@ -491,9 +491,38 @@ public static class FreeformMesh
 
 				if (tried) continue;
 
-				// Reject this diagonal if it crosses any existing spine segment
+				// Reject if this diagonal crosses any existing spine segment
 				if (DiagonalCrossesConstraint(spinePos, boundaryPos, prunedSpine))
 					continue;
+
+				// Reject if this diagonal crosses any already-committed fixing diagonal.
+				// DiagonalCrossesConstraint only tests against prunedSpine, so we must
+				// check existingPairs separately — a candidate that crosses a previously
+				// added fixing edge is also an illegal edge.
+				bool crossesExisting = false;
+				foreach (var (existingSpine, existingBoundary) in existingPairs)
+				{
+					// Skip if they share an endpoint (touching is fine, crossing is not)
+					if (Vector2.Distance(spinePos, existingSpine) < Eps ||
+						Vector2.Distance(spinePos, existingBoundary) < Eps ||
+						Vector2.Distance(boundaryPos, existingSpine) < Eps ||
+						Vector2.Distance(boundaryPos, existingBoundary) < Eps)
+						continue;
+
+					float d1 = Cross(existingSpine, existingBoundary, spinePos);
+					float d2 = Cross(existingSpine, existingBoundary, boundaryPos);
+					float d3 = Cross(spinePos, boundaryPos, existingSpine);
+					float d4 = Cross(spinePos, boundaryPos, existingBoundary);
+
+					if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+						((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0)))
+					{
+						crossesExisting = true;
+						break;
+					}
+				}
+
+				if (crossesExisting) continue;
 
 				return (spinePos, boundaryPos);
 			}
@@ -592,7 +621,7 @@ public static class FreeformMesh
 		{
 			Debug.Log($"Seeded {seedPairs.Count} non-degenerate spine to boundary edge(s) as hard constraints.");
 			var seededPoly = BuildPolygon(boundaryPoints, spinePoints, prunedSpine, allFixingPairs);
-			currentMesh = (TriangleNet.Mesh)seededPoly.Triangulate(meshOptions, null);
+			currentMesh = (TriangleNet.Mesh)seededPoly.Triangulate(meshOptions, qualityOptions);
 		}
 		else Debug.LogWarning("Potential Seeded Triangulation Error");
 
@@ -610,7 +639,7 @@ public static class FreeformMesh
 			allFixingPairs.Add(newPair.Value);
 			Debug.Log($"Iteration {safety}: adding diagonal {newPair.Value.spine} to {newPair.Value.boundary}");
 			var newPoly = BuildPolygon(boundaryPoints, spinePoints, prunedSpine, allFixingPairs);
-			currentMesh = (TriangleNet.Mesh)newPoly.Triangulate(meshOptions, null);
+			currentMesh = (TriangleNet.Mesh)newPoly.Triangulate(meshOptions, qualityOptions);
 		}
 
 		if (safety >= 1000)
@@ -638,17 +667,17 @@ public static class FreeformMesh
 		#region Inline Helpers
 		void AddEdge(Vector2 a, Vector2 b)
 		{
-			if (!vc.TryGetValue(a, out int ia)) 
-			{ 
+			if (!vc.TryGetValue(a, out int ia))
+			{
 				ia = verts.Count;
-				verts.Add(a); 
-				vc[a] = ia; 
+				verts.Add(a);
+				vc[a] = ia;
 			}
 
-			if (!vc.TryGetValue(b, out int ib)) 
-			{ 
-				ib = verts.Count; 
-				verts.Add(b); 
+			if (!vc.TryGetValue(b, out int ib))
+			{
+				ib = verts.Count;
+				verts.Add(b);
 				vc[b] = ib;
 			}
 
@@ -683,13 +712,13 @@ public static class FreeformMesh
 		{
 			if (depth == 0)
 			{
-				AddEdge(topA, topB); 
+				AddEdge(topA, topB);
 				AddEdge(topB, botB);
-				AddEdge(botB, botA); 
+				AddEdge(botB, botA);
 				AddEdge(botA, topA);
 
 				// diagonal splits the quad into two triangles
-				AddEdge(topA, botB); 
+				AddEdge(topA, botB);
 				return;
 			}
 
