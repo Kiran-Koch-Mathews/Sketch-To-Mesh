@@ -1,12 +1,14 @@
-﻿using NUnit;
-using System.Collections.Generic;
-using System.Globalization;
+﻿using System.Collections.Generic;
 using System.Linq;
 using TriangleNet.Geometry;
 using TriangleNet.Meshing;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.UI;
+
+#if UNITY_EDITOR
+using UnityEngine.Rendering;
+#endif
 
 public enum ShapeType
 {
@@ -75,9 +77,15 @@ public class SketchToMesh : MonoBehaviour
 	[SerializeField] private bool showTriangulation = true;
 	[SerializeField] private bool showChordalAxis = true;
 	[SerializeField] private bool showOutline = true;
-	// Store the raw Triangle.NET data here so Gizmos can see it
+	// Store the raw Triangle.NET data here so 2D Gizmos can see it
 	private TriangleNet.Mesh debugMesh;
 	private List<SpineSegment> debugSpine;
+
+	// 3D gizmo data
+	private Mesh debugUnityMesh;
+	private Transform debugMeshTransform;
+	private List<Vector3> debugOutlineWorld;
+	private List<(Vector3 start, Vector3 end, TriangleType type)> debugSpineWorld;
 
 	[Header("Data")]
 	public List<Vector2> LastCalculatedOutline { get; private set; }
@@ -183,6 +191,8 @@ public class SketchToMesh : MonoBehaviour
 		MeshRenderer mr = generatedMeshObject.AddComponent<MeshRenderer>();
 		mr.material = meshMaterial;
 		mf.mesh = mesh;
+
+		debugMeshTransform = generatedMeshObject.transform;
 
 		return generatedMeshObject;
 	}
@@ -511,9 +521,7 @@ public class SketchToMesh : MonoBehaviour
 			spinePoints = spinePointsSet.ToList();
 		}
 
-		// Compute spine elevations NOW, before subdivision.
-		// After Subdivide, spine→boundary edges are replaced by spine→intermediate
-		// chains, so direct connectivity is lost and elevations would compute as zero.
+		// Compute spine elevations before subdivision.
 		var spineElevations = FreeformMesh.ComputeSpineElevations(tMesh, spinePoints, outline, P2W);
 
 		if (pruneBranches && subdivide)
@@ -525,9 +533,8 @@ public class SketchToMesh : MonoBehaviour
 
 		debugSpine = prunedSpine;
 
-		// Elevate spine, taper intermediates with quarter-oval profile,
-		// mirror to back face — returns a closed watertight Unity Mesh.
-		return FreeformMesh.BuildInflatedMesh(
+		// Elevate spine, add smoothed curves, and build the Unity Mesh
+		var unityMesh = FreeformMesh.BuildInflatedMesh(
 			tMesh,
 			spinePoints,
 			outline,
@@ -535,6 +542,15 @@ public class SketchToMesh : MonoBehaviour
 			P2W,
 			mainCamera.transform.forward,
 			center);
+
+		debugUnityMesh = unityMesh;
+		debugOutlineWorld = outline.Select(p => P2W(p)).ToList();
+
+		debugSpineWorld = prunedSpine
+			.Select(s => (start: P2W(s.Start), end: P2W(s.End), type: s.Type))
+			.ToList();
+
+		return unityMesh;
 	}
 
 	#region Primitives
@@ -873,75 +889,78 @@ public class SketchToMesh : MonoBehaviour
 	#region Debug
 	private void OnDrawGizmos()
 	{
-		if (showStrokePoints)
+		if (showStrokePoints && debugStrokePoints != null)
 		{
-			if (debugStrokePoints != null)
-			{
-				foreach (var sp in debugStrokePoints)
-				{
-					Vector3 wp = P2W(sp.position);
-					Gizmos.color = Color.blue;
-					Gizmos.DrawSphere(wp, 0.04f);
-				}
-			}
+			Gizmos.color = Color.blue;
+			foreach (var sp in debugStrokePoints)
+				Gizmos.DrawSphere(P2W(sp.position), 0.04f);
 		}
 
-		if (debugMesh == null) return;
-
-		if (showOutline)
+		if (showOutline && debugOutlineWorld != null)
 		{
-			foreach (var p in LastCalculatedOutline)
-			{
-				Vector3 wp = P2W(p);
-				Gizmos.color = Color.black;
+			Gizmos.color = Color.black;
+			foreach (var wp in debugOutlineWorld)
 				Gizmos.DrawSphere(wp, 0.04f);
-			}
 		}
 
-		if (showTriangulation)
+		if (showTriangulation && debugUnityMesh != null && debugMeshTransform != null)
 		{
-			Gizmos.color = Color.green;
-			foreach (var tri in debugMesh.Triangles)
-			{
-				Vector3 v0 = P2W(new Vector2((float)tri.GetVertex(0).X, (float)tri.GetVertex(0).Y));
-				Vector3 v1 = P2W(new Vector2((float)tri.GetVertex(1).X, (float)tri.GetVertex(1).Y));
-				Vector3 v2 = P2W(new Vector2((float)tri.GetVertex(2).X, (float)tri.GetVertex(2).Y));
+			Vector3[] verts = debugUnityMesh.vertices;
+			int[] tris = debugUnityMesh.triangles;
+
 #if UNITY_EDITOR
-				Handles.color = Gizmos.color;
-				Handles.DrawAAPolyLine(6f, v0, v1);
-				Handles.DrawAAPolyLine(6f, v1, v2);
-				Handles.DrawAAPolyLine(6f, v2, v0);
+			var prevZTest = Handles.zTest;
+			var prevColor = Handles.color;
+
+			Handles.zTest = CompareFunction.LessEqual;
+			Handles.color = Color.black;
+
+			for (int i = 0; i < tris.Length; i += 3)
+			{
+				Vector3 v0 = debugMeshTransform.TransformPoint(verts[tris[i]]);
+				Vector3 v1 = debugMeshTransform.TransformPoint(verts[tris[i + 1]]);
+				Vector3 v2 = debugMeshTransform.TransformPoint(verts[tris[i + 2]]);
+				Handles.DrawAAPolyLine(4f, v0, v1);
+				Handles.DrawAAPolyLine(4f, v1, v2);
+				Handles.DrawAAPolyLine(4f, v2, v0);
+			}
+
+			for (int i = 0; i < verts.Length; i++)
+			{
+				Vector3 worldPos = debugMeshTransform.TransformPoint(verts[i]);
+				Handles.SphereHandleCap(0, worldPos, Quaternion.identity, 0.03f, EventType.Repaint);
+			}
+
+			// Restore state so other gizmos in the scene are unaffected
+			Handles.zTest = prevZTest;
+			Handles.color = prevColor;
 #else
+			Gizmos.color = Color.black;
+			for (int i = 0; i < tris.Length; i += 3)
+			{
+				Vector3 v0 = debugMeshTransform.TransformPoint(verts[tris[i]]);
+				Vector3 v1 = debugMeshTransform.TransformPoint(verts[tris[i + 1]]);
+				Vector3 v2 = debugMeshTransform.TransformPoint(verts[tris[i + 2]]);
 				Gizmos.DrawLine(v0, v1);
 				Gizmos.DrawLine(v1, v2);
 				Gizmos.DrawLine(v2, v0);
-#endif
 			}
 
-			Gizmos.color = Color.black;
-			foreach (var v in debugMesh.Vertices)
-				Gizmos.DrawSphere(P2W(new Vector2((float)v.X, (float)v.Y)), 0.02f);
+			for (int i = 0; i < verts.Length; i++)
+				Gizmos.DrawSphere(debugMeshTransform.TransformPoint(verts[i]), 0.03f);
+#endif
 		}
 
-		if (showChordalAxis && debugSpine != null)
+		if (showChordalAxis && debugSpineWorld != null)
 		{
-			foreach (var segment in debugSpine)
+			foreach (var (start, end, type) in debugSpineWorld)
 			{
-				Vector3 start = P2W(segment.Start);
-				Vector3 end = P2W(segment.End);
-
-				switch (segment.Type)
+				Gizmos.color = type switch
 				{
-					case TriangleType.Terminal:
-						Gizmos.color = Color.black;
-						break;
-					case TriangleType.Sleeve:
-						Gizmos.color = Color.black;
-						break;
-					case TriangleType.Junction:
-						Gizmos.color = Color.black;
-						break;
-				}
+					TriangleType.Junction => Color.red,
+					TriangleType.Terminal => Color.yellow,
+					_ => Color.black,
+				};
 
 				Gizmos.DrawSphere(start, 0.04f);
 				Gizmos.DrawSphere(end, 0.04f);
@@ -949,11 +968,10 @@ public class SketchToMesh : MonoBehaviour
 				Handles.color = Gizmos.color;
 				Handles.DrawAAPolyLine(12f, start, end);
 #else
-				Gizmos.DrawLine(start, end);
+            Gizmos.DrawLine(start, end);
 #endif
 			}
 		}
 	}
-
 	#endregion
 }
